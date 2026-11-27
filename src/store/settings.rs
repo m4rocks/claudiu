@@ -56,6 +56,7 @@ pub struct Layout {
 #[serde(rename_all = "snake_case")]
 pub enum SideCard {
     Actions,
+    Outline,
     Github,
     Subagents,
     Linked,
@@ -69,7 +70,7 @@ pub enum SideCard {
 
 impl SideCard {
     /// Every card in its default place.
-    pub const ALL: [SideCard; 6] = [Self::Actions, Self::Github, Self::Subagents, Self::Linked, Self::Status, Self::Empty];
+    pub const ALL: [SideCard; 7] = [Self::Actions, Self::Outline, Self::Github, Self::Subagents, Self::Linked, Self::Status, Self::Empty];
 }
 
 impl Layout {
@@ -397,7 +398,7 @@ mod tests {
         let moved: Layout = serde_json::from_str(r#"{"selected_session":null,"sidebar_visible":true,"other_collapsed":false,"right_cards":["status","from_the_future","actions","status"]}"#).unwrap();
         assert_eq!(
             moved.right_card_order(),
-            [SideCard::Status, SideCard::Actions, SideCard::Github, SideCard::Subagents, SideCard::Linked, SideCard::Empty]
+            [SideCard::Status, SideCard::Actions, SideCard::Outline, SideCard::Github, SideCard::Subagents, SideCard::Linked, SideCard::Empty]
         );
     }
 

@@ -5,6 +5,8 @@
 mod asks;
 mod elements;
 mod keys;
+mod outline;
+pub use outline::TurnOutlineItem;
 mod queue;
 mod render;
 mod review;

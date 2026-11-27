@@ -46,6 +46,7 @@ mod github_pane;
 mod headless;
 mod ingest;
 mod file_ops;
+mod fresh_session;
 mod layout;
 mod language_servers;
 mod lifecycle;
@@ -574,6 +575,9 @@ pub struct Workspace {
     pub search_input: Entity<InputState>,
     pub palette: Option<palette::CommandPalette>,
     compacting: HashMap<Id, uuid::Uuid>,
+    pub continuing_fresh: HashMap<Id, uuid::Uuid>,
+    pub outline_collapsed: bool,
+    pub outline_scroll: crate::panels::glide::Smooth,
     pub root_focus: FocusHandle,
     /// Up/Down/Enter in the open workspace dropdown (`panels::command::Choices`).
     pub picker_nav: crate::panels::ui::command::Nav,
@@ -812,6 +816,9 @@ impl Workspace {
             finished_subagents_open: Default::default(),
             pending_handoffs: HashMap::new(),
             compacting: HashMap::new(),
+            continuing_fresh: HashMap::new(),
+            outline_collapsed: false,
+            outline_scroll: Default::default(),
             pending_switches: vec![],
             update: UpdateState::default(),
             quitting: false,

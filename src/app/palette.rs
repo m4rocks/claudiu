@@ -207,13 +207,19 @@ impl Workspace {
                 badge: "Action",
                 title: "Toggle Shell Panel".into(),
                 subtitle: "Show or hide the embedded shell".into(),
-                action: PaletteAction::RunAct(Box::new(Act::ToggleShell(id))),
+                action: PaletteAction::RunAct(Box::new(Act::ToggleShell(id.clone()))),
             });
             items.push(PaletteItem {
                 badge: "Action",
                 title: "Compact Context".into(),
                 subtitle: "Summarize this conversation into a fresh context window".into(),
                 action: PaletteAction::CompactActive,
+            });
+            items.push(PaletteItem {
+                badge: "Action",
+                title: "Continue in Fresh Session".into(),
+                subtitle: "Summarize this thread and start a linked fresh session".into(),
+                action: PaletteAction::RunAct(Box::new(Act::ContinueInFreshSession(id.clone()))),
             });
             items.push(PaletteItem {
                 badge: "Action",

@@ -92,6 +92,8 @@ pub enum Act {
     },
     /// Generate a new title from the session’s first user message.
     RegenTitle(Id),
+    /// Summarize an idle session and start a new linked session in the same project/cwd.
+    ContinueInFreshSession(Id),
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, Option<bool>),
     SetPrecomputeCompact(Id, bool),
@@ -283,6 +285,7 @@ impl Workspace {
                 self.open_github(cwd, window, cx)
             }
             Act::RegenTitle(id) => self.regen_title(&id, cx),
+            Act::ContinueInFreshSession(id) => self.continue_in_fresh_session(&id, window, cx),
             Act::CommitPush(cwd) => {
                 let generator = self.text_generator(cx);
                 self.run_git(

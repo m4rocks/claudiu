@@ -191,6 +191,12 @@ impl Workspace {
         let id = self.active_id().cloned();
         let running = id.as_ref().is_some_and(|id| self.is_running(id, cx));
         let actions = self.action_rows(&shown, id.as_ref(), running, cx);
+        let outline_items = id
+            .as_deref()
+            .and_then(|i| self.live_view(i)?.thread())
+            .map(|t| t.read(cx).turn_outline())
+            .filter(|items| !items.is_empty());
+        let outline = outline_items.map(|items| self.outline_card(id.as_ref(), items, window, cx));
         let attached = id.as_deref().map(|i| self.attached_of(i)).unwrap_or_default();
         let github = (!attached.is_empty()).then(|| (attached.len(), self.attached_rows(id.as_ref(), attached, cx)));
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
@@ -203,6 +209,7 @@ impl Workspace {
         }
         let mut cards: Vec<(SideCard, Div)> = [
             (SideCard::Actions, Some(group("ACTIONS", None, actions))),
+            (SideCard::Outline, outline),
             (SideCard::Github, github.map(|(n, g)| group("GITHUB", Some(n), g))),
             (SideCard::Subagents, subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s))),
             (SideCard::Linked, linked.map(|(n, l)| group("LINKED", Some(n), l))),
@@ -390,6 +397,20 @@ impl Workspace {
         } else if id.is_none() {
             actions = actions.child(dim_row("find-in-session", IconName::Search, "Find in session"));
         }
+        if let Some(sid) = id.filter(|id| self.live_view(id).and_then(|v| v.thread()).is_some()).cloned() {
+            if self.continuing_fresh.contains_key(&sid) {
+                actions = actions.child(dim_row("continue-fresh-session", IconName::LoaderCircle, "Continuing in fresh session…"));
+            } else {
+                actions = actions.child(
+                    row("continue-fresh-session", IconName::CornerDownRight, "Continue in fresh session")
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            ws.act(Act::ContinueInFreshSession(sid.clone()), window, cx);
+                        })),
+                );
+            }
+        } else if id.is_none() {
+            actions = actions.child(dim_row("continue-fresh-session", IconName::CornerDownRight, "Continue in fresh session"));
+        }
         let gh_cwd = shown.cwd.clone();
         actions.child(if let Some(cwd) = gh_cwd {
             row("github", IconName::GitPullRequest, "GitHub")
@@ -397,6 +418,76 @@ impl Workspace {
         } else {
             dim_row("github", IconName::GitPullRequest, "GitHub")
         })
+    }
+
+    /// Collapsible Turn Outline card listing each visible user prompt; clicking a row jumps to that turn.
+    fn outline_card(
+        &mut self,
+        id: Option<&Id>,
+        items: Vec<crate::thread::TurnOutlineItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let count = items.len();
+        let collapsed = self.outline_collapsed;
+        let chevron = if collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
+        let header = div()
+            .id("right-outline-toggle")
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme().row_hover))
+            .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                ws.outline_collapsed = !ws.outline_collapsed;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(div().text_color(theme().subtle_foreground).child(icon(chevron, 12.0)))
+                    .child(section_label("OUTLINE".to_string())),
+            )
+            .child(section_label(count.to_string()));
+        if collapsed {
+            return card().child(header);
+        }
+        let mut rows = self
+            .outline_scroll
+            .wire(div().id("right-outline-list").max_h(px(240.0)).overflow_y_scroll(), window)
+            .flex()
+            .flex_col()
+            .gap(px(1.0));
+        for item in items {
+            let sid = id.cloned();
+            let row_ix = item.row;
+            let badge = div()
+                .flex_none()
+                .min_w(px(22.0))
+                .text_size(crate::panels::scale::px(11.0))
+                .text_color(theme().subtle_foreground)
+                .child(format!("#{}", item.turn));
+            rows = rows.child(
+                lead_row(format!("outline-turn-{}", item.row), badge.into_any_element(), item.preview)
+                    .text_color(theme().foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme().row_hover))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                        if let Some(sid) = &sid {
+                            ws.show_session(sid, window, cx);
+                            if let Some(view) = ws.live_view(sid).and_then(|v| v.thread()).cloned() {
+                                view.update(cx, |view, cx| view.jump_to_turn(row_ix, cx));
+                            }
+                        }
+                    })),
+            );
+        }
+        card().child(header).child(rows)
     }
 
     /// Issues and pull requests attached to the session: click to open, × to take off.
