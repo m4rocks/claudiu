@@ -3,7 +3,7 @@ use gpui::px;
 
 #[test]
 #[ignore]
-fn empty_card_fills_the_right_sidebar() {
+fn empty_card_fills_the_right_sidebar_and_shrinks_away_when_the_cards_need_the_room() {
     let _data = crate::datadir::own_folder();
     let mut cx = TestAppContext::single();
     cx.update(gpui_kit::init);
@@ -14,10 +14,17 @@ fn empty_card_fills_the_right_sidebar() {
         cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
 
         let scroll = ws.read_with(&cx, |ws, _| ws.menu_scroll.handle());
-        let empty = scroll.bounds_for_item(2).expect("empty card after Actions and Status");
+        let empty = scroll.bounds_for_item(1).expect("the empty card after the cards");
         assert!(empty.size.height > px(72.0));
         assert_eq!(empty.bottom(), scroll.bounds().bottom());
+        assert_eq!(scroll.max_offset().y, px(0.0), "nothing to scroll while the empty card has room");
     }
+
+    cx.simulate_window_resize(window, gpui::size(px(1200.0), px(160.0)));
+    cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+    let scroll = ws.read_with(&cx, |ws, _| ws.menu_scroll.handle());
+    assert_eq!(scroll.bounds_for_item(1).expect("the empty card").size.height, px(0.0), "gone once the cards need the room");
+    assert!(scroll.max_offset().y > px(0.0), "the cards scroll");
 }
 
 /// A changed file in a repository gets marks in the editor's gutter (see `panels::editor_pane::change_marks`).

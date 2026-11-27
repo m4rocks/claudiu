@@ -54,7 +54,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 - **Shell panel (`Ctrl+J` / `Ctrl+\``)**: A real PTY shell in the session's folder. Agents never run in a PTY and m4code never types into the shell.
 - **Sessions, sidebars, and cards**:
   - Left sidebar of running and recent sessions (`Cmd/Ctrl+Z` reopens the last closed session), **Pick up a session here** to open terminal-started sessions in a folder, and background notifications when a session finishes or asks a question.
-  - Right sidebar with drag-to-reorder cards for session status, subagents, GitHub issues and pull requests, and linked sessions, plus inline visual cards agents draw in chat.
+  - Right sidebar with cards for actions, the turn outline, session status, subagents, GitHub issues and pull requests, and linked sessions, plus inline visual cards agents draw in chat.
   - GitHub labels, assignees, edits, and comments update immediately while saving. Failed edits restore the previous content and retain the draft. If a comment posts but closing the item fails, retry close/reopen separately to avoid posting twice.
   - **Ask Agent** in the GitHub pane sends the request to the active agent if it is running in the repository. When it starts a new session, it uses the model selected in the Welcome composer.
   - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code and Codex 5-hour/7-day limits). Usage dashboard links for OpenCode and Antigravity are shown only when their harnesses are enabled.

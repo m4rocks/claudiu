@@ -23,11 +23,11 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 #[ignore = "requires an offscreen GPU renderer; run with just screenshot"]
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
-    let session_scenario = matches!(scenario.as_str(), "session" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "review" | "review-hover");
+    let session_scenario = matches!(scenario.as_str(), "session" | "session-short" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "review" | "review-hover");
     let shortcut = match scenario.as_str() {
-        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "harnesses" | "review" | "review-hover" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-short" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "harnesses" | "review" | "review-hover" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-done, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-short, session-done, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -219,6 +219,14 @@ fn capture() -> Result<()> {
             ensure!(std::time::Instant::now() < until, "the sample file never opened");
             std::thread::yield_now();
         }
+    }
+    if scenario == "session-short" {
+        // Too short for the right sidebar's cards, so it scrolls.
+        cx.update_window(window, |_, window, app| {
+            window.resize(gpui::size(gpui::px(1200.0), gpui::px(420.0)));
+            window.bounds_changed(app);
+        })?;
+        cx.run_until_parked();
     }
     if scenario == "session-events" {
         cx.update_window(window, |_, window, app| {

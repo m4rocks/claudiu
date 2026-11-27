@@ -46,45 +46,6 @@ pub struct Layout {
     /// Width of the right sidebar's menu when the user has dragged it; the default otherwise.
     #[serde(default)]
     pub right_menu_w: Option<f32>,
-    /// The right sidebar's cards top to bottom, as the user dragged them; `right_card_order` fills in the rest.
-    #[serde(default)]
-    pub right_cards: Vec<SideCard>,
-}
-
-/// One card of the right sidebar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SideCard {
-    Actions,
-    Outline,
-    Github,
-    Subagents,
-    Linked,
-    Status,
-    /// A blank card, kept in the layout for something later.
-    Empty,
-    /// A card this version doesn't know (or a removed one like `account`), keeping older/newer state files loading.
-    #[serde(other)]
-    Unknown,
-}
-
-impl SideCard {
-    /// Every card in its default place.
-    pub const ALL: [SideCard; 7] = [Self::Actions, Self::Outline, Self::Github, Self::Subagents, Self::Linked, Self::Status, Self::Empty];
-}
-
-impl Layout {
-    /// The cards in the order the user left them, then any the saved order doesn't name (every card, in a state file
-    /// from before they could move) in their default order.
-    pub fn right_card_order(&self) -> Vec<SideCard> {
-        let mut order: Vec<SideCard> = vec![];
-        for card in self.right_cards.iter().chain(SideCard::ALL.iter()) {
-            if *card != SideCard::Unknown && !order.contains(card) {
-                order.push(*card);
-            }
-        }
-        order
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,17 +351,7 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{FollowUp, Layout, SideCard};
-
-    #[test]
-    fn the_cards_keep_the_users_order_and_gain_the_ones_it_misses() {
-        assert_eq!(Layout::default().right_card_order(), SideCard::ALL, "an older state file");
-        let moved: Layout = serde_json::from_str(r#"{"selected_session":null,"sidebar_visible":true,"other_collapsed":false,"right_cards":["status","from_the_future","actions","status"]}"#).unwrap();
-        assert_eq!(
-            moved.right_card_order(),
-            [SideCard::Status, SideCard::Actions, SideCard::Outline, SideCard::Github, SideCard::Subagents, SideCard::Linked, SideCard::Empty]
-        );
-    }
+    use super::FollowUp;
 
     #[test]
     fn auto_compact_settings_default_on_at_ninety_percent() {

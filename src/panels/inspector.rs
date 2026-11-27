@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, Window, div, linear_color_stop, linear_gradient, px,
 };
 
 use std::time::Duration;
@@ -13,10 +13,8 @@ use std::time::Duration;
 use gpui::{Animation, AnimationExt};
 
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
-use crate::panels::sidebar::{DragGhost, Slide, is_reorder, lifted, move_to, slid};
 use crate::panels::widgets::Trigger;
-use crate::store::SideCard;
-use gpui::{AppContext, DragMoveEvent, prelude::FluentBuilder};
+use gpui::prelude::FluentBuilder;
 use crate::platform::Editor;
 use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
@@ -204,113 +202,39 @@ impl Workspace {
         let children = id.as_deref().map(|i| self.subagent_list(i, cx)).unwrap_or_default();
         let subagents = id.as_ref().filter(|_| !children.is_empty()).map(|parent| (children.len(), self.subagent_rows(parent, children, cx)));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
-        if self.dragging_card.is_some() && !cx.has_active_drag() {
-            self.dragging_card = None;
-        }
-        let mut cards: Vec<(SideCard, Div)> = [
-            (SideCard::Actions, Some(group("ACTIONS", None, actions))),
-            (SideCard::Outline, outline),
-            (SideCard::Github, github.map(|(n, g)| group("GITHUB", Some(n), g))),
-            (SideCard::Subagents, subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s))),
-            (SideCard::Linked, linked.map(|(n, l)| group("LINKED", Some(n), l))),
-            (SideCard::Status, Some(group("STATUS", None, status))),
-            (SideCard::Empty, Some(card().min_h(px(72.0)).flex_grow_1())),
-        ]
-        .into_iter()
-        .filter_map(|(kind, card)| Some((kind, card?)))
-        .collect();
-        let order = self.store.data.layout.right_card_order();
-        cards.sort_by_key(|(kind, _)| order.iter().position(|k| k == kind));
-        let visible_kinds: Vec<SideCard> = cards.iter().map(|(kind, _)| *kind).collect();
-        if is_reorder(&self.prev_right_cards, &visible_kinds) {
-            self.card_slide_gen += 1;
-            let bounds = self.card_bounds.borrow();
-            let base_y = self
-                .prev_right_cards
-                .first()
-                .and_then(|k| bounds.get(k))
-                .map(|(top, _)| *top)
-                .unwrap_or(0.0);
-            let mut y = base_y;
-            for kind in &visible_kinds {
-                let (old_top, height) = bounds.get(kind).copied().unwrap_or((y, 0.0));
-                let delta = old_top - y;
-                if delta.abs() > 0.5 && self.dragging_card != Some(*kind) {
-                    self.card_slides.insert(*kind, Slide { from: delta, epoch: self.card_slide_gen });
-                }
-                y += height + theme::PANEL_GAP;
-            }
-        }
-        self.prev_right_cards = visible_kinds;
-        let cards: Vec<AnyElement> = cards
-            .into_iter()
-            .map(|(kind, card)| {
-                let slide = self.card_slides.get(&kind).copied();
-                let card_bounds = self.card_bounds.clone();
-                let probe = gpui::canvas(
-                    move |bounds, _, _| {
-                        card_bounds.borrow_mut().insert(kind, (f32::from(bounds.origin.y), f32::from(bounds.size.height)));
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full();
-                let el = self.draggable_card(kind, card, cx).relative().child(probe);
-                slid(el, &format!("card-{kind:?}"), slide)
-            })
-            .collect();
-        self.menu_scroll
+        // The cards in their set order, then the empty one, which takes the height left over and shrinks away once
+        // the cards need it all. Its gap is inside it, so nothing is left of it at zero height.
+        let cards = [
+            Some(group("ACTIONS", None, actions)),
+            outline,
+            github.map(|(n, g)| group("GITHUB", Some(n), g)),
+            subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s)),
+            linked.map(|(n, l)| group("LINKED", Some(n), l)),
+            Some(group("STATUS", None, status)),
+        ];
+        let empty = div().relative().flex_grow_1().min_h_0().overflow_hidden()
+            .child(card().absolute().top(px(theme::PANEL_GAP)).bottom_0().left_0().right_0());
+        let scroll = self.menu_scroll.handle();
+        let (top, max) = (-f32::from(scroll.offset().y), f32::from(scroll.max_offset().y));
+        let list = self
+            .menu_scroll
             .wire(div().id("right-menu").size_full(), window)
             .flex()
             .flex_col()
-            .gap(px(theme::PANEL_GAP))
-            .children(cards)
-    }
-
-    /// A card you can drag over the others to move it; the order is saved as it changes.
-    fn draggable_card(&self, kind: SideCard, card: Div, cx: &mut Context<Self>) -> Stateful<Div> {
-        let ws = cx.entity().downgrade();
-        card.id(SharedString::from(format!("right-card-{kind:?}")))
-            .on_drag(DragCard(kind), move |_, _, _, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.dragging_card = Some(kind);
-                    ws.drag_pos = None;
-                    cx.notify();
-                })
-                .ok();
-                cx.new(|_| DragGhost)
-            })
-            .on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragCard>, _w, cx| {
-                let from = ev.drag(cx).0;
-                if from == kind || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
-                    return;
-                }
-                // Cards differ in height, so a short card dragged onto a tall one could still be over it after they
-                // swap, and swap back. It moves only once the pointer is past the middle of the card it goes over, in
-                // the direction it travels, which the card that moved out of the way never is.
-                let order = ws.store.data.layout.right_card_order();
-                let at = |card: SideCard| order.iter().position(|k| *k == card);
-                let down = at(from) < at(kind);
-                let middle = ev.bounds.center().y;
-                if (down && ev.event.position.y < middle) || (!down && ev.event.position.y > middle) {
-                    return;
-                }
-                ws.move_right_card(from, kind);
-                ws.last_swap = std::time::Instant::now();
-                cx.notify();
-            }))
-            .when(self.dragging_card == Some(kind), lifted)
-    }
-
-    /// Put card `from` where card `to` is, and save the order.
-    fn move_right_card(&mut self, from: SideCard, to: SideCard) {
-        let mut order = self.store.data.layout.right_card_order();
-        let at = |card: SideCard| order.iter().position(|k| *k == card);
-        if let (Some(from), Some(to)) = (at(from), at(to)) {
-            move_to(&mut order, from, to);
-            self.store.data.layout.right_cards = order;
-            self.store.mark_dirty();
-        }
+            // The scrollbar gets a gutter of its own rather than covering the cards' edge.
+            .when(max > 0.5, |d| d.pr(px(10.0)))
+            .child(div().flex_none().flex().flex_col().gap(px(theme::PANEL_GAP)).children(cards.into_iter().flatten()))
+            .child(empty);
+        // Once the cards outgrow the sidebar, a scrollbar shows and the edge with more beyond it fades.
+        let window_bg = theme().window;
+        let fade = |angle: f32| linear_gradient(angle, linear_color_stop(window_bg.opacity(0.0), 0.0), linear_color_stop(window_bg, 1.0));
+        div()
+            .relative()
+            .size_full()
+            .child(list)
+            .when(top > 0.5, |d| d.child(div().absolute().top_0().left_0().right_0().h(px(24.0)).bg(fade(0.0))))
+            .when(max - top > 0.5, |d| d.child(div().absolute().bottom_0().left_0().right_0().h(px(32.0)).bg(fade(180.0))))
+            .when(max > 0.5, |d| d.child(gpui_kit::base::Scrollbar::vertical(&scroll).mode(gpui_kit::base::ScrollbarMode::Always)))
     }
 
     /// Open in the editor, the folder, git, the shell and the GitHub view.
@@ -711,9 +635,6 @@ fn subagent_row(parent: &Id, child: SubagentRow, cx: &mut Context<Workspace>) ->
             }
         }))
 }
-
-/// Drag payload: a right sidebar card, dragged over another to move it there.
-struct DragCard(SideCard);
 
 /// A card of the right sidebar, which sits on the window's background: drawn like the chat's panel.
 fn card() -> Div {

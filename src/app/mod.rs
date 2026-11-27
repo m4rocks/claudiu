@@ -620,13 +620,6 @@ pub struct Workspace {
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
     pub dragging: Option<Id>,
-    /// The right sidebar card being dragged, lifted in place like a session row.
-    pub dragging_card: Option<crate::store::SideCard>,
-    /// Right sidebar card reorder animation: last drawn order, each card's last `(top, height)` and slides in flight.
-    pub prev_right_cards: Vec<crate::store::SideCard>,
-    pub card_bounds: std::rc::Rc<std::cell::RefCell<HashMap<crate::store::SideCard, (f32, f32)>>>,
-    pub card_slides: HashMap<crate::store::SideCard, crate::panels::sidebar::Slide>,
-    pub card_slide_gen: u64,
     /// Pointer position at the last drag-over check, see `pointer_moved`.
     /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
@@ -792,11 +785,6 @@ impl Workspace {
                 .collect(),
             window_title: String::new(),
             dragging: None,
-            dragging_card: None,
-            prev_right_cards: Vec::new(),
-            card_bounds: Default::default(),
-            card_slides: HashMap::new(),
-            card_slide_gen: 0,
             drag_pos: None,
             prev_current: Vec::new(),
             slides: HashMap::new(),
