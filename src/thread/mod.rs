@@ -14,7 +14,7 @@ mod find;
 mod telemetry;
 pub(crate) use telemetry::exhausted_usage;
 mod user_actions;
-pub(crate) use user_actions::clear_timestamps;
+pub(crate) use user_actions::{clear_notices, clear_timestamps};
 
 pub use render::short_effort_label;
 
@@ -530,6 +530,10 @@ pub struct ThreadView {
     user_timestamps: BTreeMap<usize, i64>,
     /// True once persisted timestamps have finished loading from disk.
     timestamps_loaded: bool,
+    /// Optional header notices keyed by 0-based visible user-message ordinal.
+    user_notices: BTreeMap<usize, user_actions::UserNotice>,
+    /// True once persisted notices have finished loading from disk.
+    notices_loaded: bool,
     /// Confirmation dialog state when retrying a turn that will restore checkpoint files.
     retry_confirm: Option<user_actions::RetryConfirm>,
     /// True while restoring checkpoint files before retrying a turn.
@@ -748,6 +752,8 @@ impl ThreadView {
             capturing_reviews: 0,
             user_timestamps,
             timestamps_loaded: false,
+            user_notices: BTreeMap::new(),
+            notices_loaded: false,
             retry_confirm: None,
             retrying_turn: false,
             pending_retry: None,
@@ -765,9 +771,9 @@ impl ThreadView {
         cx.spawn(async move |this, cx| {
             let record = start.record_id.clone();
             let restore = start.session_id.is_some() && start.prior_entries.is_empty();
-            let (entries, reviews, timestamps) = cx.background_executor().spawn(async move {
+            let (entries, reviews, timestamps, notices) = cx.background_executor().spawn(async move {
                 let entries = if restore { crate::harness::thread::load_entries(&record) } else { Vec::new() };
-                (entries, review::load_turn_reviews(&record), user_actions::load_timestamps(&record))
+                (entries, review::load_turn_reviews(&record), user_actions::load_timestamps(&record), user_actions::load_notices(&record))
             }).await;
             if this.update(cx, |v, cx| {
                 if restore {
@@ -789,6 +795,18 @@ impl ThreadView {
                     let snapshot = v.user_timestamps.clone();
                     cx.background_executor().spawn(async move {
                         user_actions::save_timestamps(&record, &snapshot);
+                    }).detach();
+                }
+                let had_new_notices = !v.user_notices.is_empty();
+                for (ordinal, notice) in notices {
+                    v.user_notices.entry(ordinal).or_insert(notice);
+                }
+                v.notices_loaded = true;
+                if had_new_notices {
+                    let record = v.record_id.clone();
+                    let snapshot = v.user_notices.clone();
+                    cx.background_executor().spawn(async move {
+                        user_actions::save_notices(&record, &snapshot);
                     }).detach();
                 }
                 v.canonical_history |= !v.turn_reviews.is_empty() || v.thread.entries.iter().any(|e| needs_history_seed(e) || matches!(e, Entry::WorkspaceBoundary(_)));
@@ -2091,6 +2109,9 @@ impl ThreadView {
             next.shown = true;
             shown_row = Some(at);
             self.record_user_timestamp(at, cx);
+            if let Some(notice) = next.notice.clone() {
+                self.record_user_notice(at, notice, cx);
+            }
             self.cached_replay = false;
             self.sync_markdown(at, cx);
             self.remeasure(at);
@@ -2823,17 +2844,27 @@ impl ThreadView {
                             v.thread.mode = confirmed.or(current);
                             v.queue_held = true;
                             v.permission_error(format!("{} did not confirm {} permissions.", v.harness.name(), wanted.label()), cx);
+                            if v.pending_retry.is_some() {
+                                v.cancel_pending_retry("Could not preserve permission mode; retry cancelled.", cx);
+                            }
                         } else {
                             v.thread.mode = Some(mode.into());
                             v.auto_fallback = auto_fallback;
                             v.read_only_unconfirmed = false;
                             cx.emit(ThreadEvent::PermissionPreference(wanted));
-                            v.send_next(cx);
+                            if v.pending_retry.is_some() {
+                                v.complete_pending_retry(cx);
+                            } else {
+                                v.send_next(cx);
+                            }
                         }
                     }
                     Err(why) => {
                         v.queue_held = true;
                         v.permission_error(why, cx);
+                        if v.pending_retry.is_some() {
+                            v.cancel_pending_retry("Could not preserve permission mode; retry cancelled.", cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -4467,7 +4498,16 @@ mod tests {
         });
         let view = thread.unwrap();
 
-        // Without a live `thought_level` option -> retry button is hidden (cannot apply higher thinking).
+        // While the harness is loading (Phase::Starting), the retry button stays visible and disabled.
+        view.update(cx, |v, _| {
+            v.phase = super::Phase::Starting;
+            let actions = v.user_actions_for(0);
+            assert_eq!(actions.len(), 1);
+            assert!(actions[0].on_click.is_none());
+            assert_eq!(actions[0].tooltip.as_ref(), "Session is not ready");
+        });
+
+        // Once ready, without a live `thought_level` option -> retry button is hidden (cannot apply higher thinking).
         view.update(cx, |v, _| {
             v.phase = super::Phase::Ready;
             assert!(v.user_actions_for(0).is_empty());
@@ -4532,7 +4572,11 @@ mod tests {
             v.pending_retry = Some(super::user_actions::PendingRetry {
                 option_id: "effort".into(),
                 expected_effort: "high".into(),
+                effort_label: "High".into(),
                 prompt: "Refactor the parser".into(),
+                expected_permission: None,
+                expected_mode: None,
+                permission_restored: false,
             });
             v.complete_pending_retry(cx);
             assert!(v.pending_retry.is_none());
@@ -4540,19 +4584,48 @@ mod tests {
             assert!(matches!(v.thread.entries.last(), Some(Entry::Notice { error: true, .. })));
         });
 
-        // Without a checkpoint -> retries immediately in-place, bumping effort and pushing to the front of the queue.
+        // Permission mode drift that cannot be restored cancels the pending retry instead of sending under the wrong mode.
+        view.update(cx, |v, cx| {
+            v.thread.config = vec![live_thought_option("high")];
+            v.thread.mode = Some("default".into());
+            v.pending_retry = Some(super::user_actions::PendingRetry {
+                option_id: "effort".into(),
+                expected_effort: "high".into(),
+                effort_label: "High".into(),
+                prompt: "Refactor the parser".into(),
+                expected_permission: Some(super::Permission::ReadOnly),
+                expected_mode: Some("plan".into()),
+                permission_restored: false,
+            });
+            v.complete_pending_retry(cx);
+            assert!(v.pending_retry.is_none());
+            assert!(v.queue.is_empty(), "drifted permission mode must not send retry");
+            assert!(matches!(v.thread.entries.last(), Some(Entry::Notice { error: true, .. })));
+        });
+
+        // Without a checkpoint -> still asks for confirmation, then bumps effort and attaches a resent notice.
         view.update(cx, |v, _| {
             v.turn_reviews.clear();
             v.thread.config = vec![live_thought_option("medium")];
+            v.thread.mode = Some("plan".into());
             v.queue.push_back(super::Queued::new("Later message".into(), true));
         });
         cx.update(|window, app| {
             view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
         });
         view.read_with(cx, |v, _| {
+            assert!(v.retry_confirm.is_some(), "retry should always ask for confirmation");
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.confirm_retry_turn(window, cx));
+        });
+        view.read_with(cx, |v, _| {
             assert!(v.retry_confirm.is_none());
             assert_eq!(v.pending_effort.as_deref(), Some("high"));
-            assert_eq!(v.queue.front().map(|q| q.text.as_str()), Some("Refactor the parser"));
+            assert_eq!(v.thread.mode.as_deref(), Some("plan"));
+            let front = v.queue.front().expect("retry should be pushed to front of queue");
+            assert_eq!(front.text.as_str(), "Refactor the parser");
+            assert_eq!(front.notice, Some(super::user_actions::UserNotice::ResentHigherThinking { effort: "High".into() }));
         });
     }
 

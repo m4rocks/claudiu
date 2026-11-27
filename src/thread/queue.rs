@@ -24,11 +24,13 @@ pub(super) struct Queued {
     pub hidden: bool,
     pub ahead: bool,
     pub shown: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<super::user_actions::UserNotice>,
 }
 
 impl Queued {
     pub fn new(text: String, by_user: bool) -> Self {
-        Self { id: Uuid::new_v4(), order: next_order(), startup: false, text, compact: false, by_user, hidden: false, ahead: false, shown: false }
+        Self { id: Uuid::new_v4(), order: next_order(), startup: false, text, compact: false, by_user, hidden: false, ahead: false, shown: false, notice: None }
     }
 
     pub fn hidden(text: String) -> Self {

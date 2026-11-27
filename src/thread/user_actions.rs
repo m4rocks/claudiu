@@ -26,11 +26,37 @@ pub(super) struct RetryConfirm {
     pub later_checkpoints: usize,
 }
 
-/// A retry waiting for the live `thought_level` option change to be confirmed by the harness before dispatching.
+/// Optional notice shown above a user message on the right side (icon + text).
+/// Add new variants here as other per-message notices are introduced.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum UserNotice {
+    ResentHigherThinking { effort: String },
+}
+
+impl UserNotice {
+    pub(super) fn icon(&self) -> IconName {
+        match self {
+            Self::ResentHigherThinking { .. } => IconName::Brain,
+        }
+    }
+
+    pub(super) fn text(&self) -> String {
+        match self {
+            Self::ResentHigherThinking { effort } => format!("Resent with {effort} thinking"),
+        }
+    }
+}
+
+/// A retry waiting for the live `thought_level` option change (and permission preservation) to be confirmed before dispatching.
 pub(super) struct PendingRetry {
     pub option_id: String,
     pub expected_effort: String,
+    pub effort_label: String,
     pub prompt: String,
+    pub expected_permission: Option<crate::harness::permission::Permission>,
+    pub expected_mode: Option<String>,
+    pub permission_restored: bool,
 }
 
 type ActionHandler = Box<dyn Fn(&mut ThreadView, &mut Window, &mut Context<ThreadView>) + 'static>;
@@ -99,6 +125,39 @@ pub(super) fn save_timestamps(record: &str, timestamps: &BTreeMap<usize, i64>) {
 pub(crate) fn clear_timestamps(record: &str) {
     if !record.is_empty() {
         let _ = std::fs::remove_file(timestamps_path(record));
+    }
+}
+
+fn notices_path(record: &str) -> PathBuf {
+    crate::datadir::data_dir().join("user-notices").join(format!("{}.json", crate::datadir::safe_file_stem(record)))
+}
+
+pub(super) fn load_notices(record: &str) -> BTreeMap<usize, UserNotice> {
+    if record.is_empty() {
+        return BTreeMap::new();
+    }
+    std::fs::read(notices_path(record))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub(super) fn save_notices(record: &str, notices: &BTreeMap<usize, UserNotice>) {
+    if record.is_empty() {
+        return;
+    }
+    if notices.is_empty() {
+        clear_notices(record);
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(notices) {
+        let _ = crate::datadir::write_atomic(&notices_path(record), &json);
+    }
+}
+
+pub(crate) fn clear_notices(record: &str) {
+    if !record.is_empty() {
+        let _ = std::fs::remove_file(notices_path(record));
     }
 }
 
@@ -229,6 +288,18 @@ impl ThreadView {
         }
     }
 
+    pub(super) fn record_user_notice(&mut self, row: usize, notice: UserNotice, cx: &mut Context<Self>) {
+        let Some(ordinal) = visible_user_ordinal(&self.thread.entries, row) else { return };
+        self.user_notices.insert(ordinal, notice);
+        if self.notices_loaded {
+            let record = self.record_id.clone();
+            let snapshot = self.user_notices.clone();
+            cx.background_executor().spawn(async move {
+                save_notices(&record, &snapshot);
+            }).detach();
+        }
+    }
+
     /// The next higher thinking level offered by the live `thought_level` option of the current session.
     fn next_higher_effort(&self) -> NextThinking {
         let Some(opt) = self.thread.option("thought_level") else {
@@ -309,13 +380,14 @@ impl ThreadView {
     /// Actions shown in the footer bar of the user message at `row`.
     pub(super) fn user_actions_for(&self, row: usize) -> Vec<UserAction> {
         let mut actions = Vec::new();
-        if self.is_active_user_row(row) {
-            return actions;
-        }
         let next = self.next_higher_effort();
         let (tooltip, enabled) = match (&next, self.retry_block_reason()) {
+            (NextThinking::Unsupported, _) if self.phase != Phase::Ready || self.workspace_switching => {
+                (self.retry_block_reason().unwrap_or("Session is not ready").to_string(), false)
+            }
             (NextThinking::Unsupported, _) => return actions,
             (NextThinking::AtMax, _) => ("Already at max thinking".to_string(), false),
+            (_, _) if self.is_active_user_row(row) => ("Wait for the current turn to finish".to_string(), false),
             (NextThinking::Higher(_, _, _), Some(reason)) => (reason.to_string(), false),
             (NextThinking::Higher(_, _, label), None) => {
                 let checkpoints = self.retry_checkpoints_for(row);
@@ -351,23 +423,19 @@ impl ThreadView {
         let NextThinking::Higher(option_id, effort, effort_label) = self.next_higher_effort() else { return };
         let prompt = prompt.clone();
         let checkpoints = self.retry_checkpoints_for(row);
-        if !checkpoints.is_empty() {
-            let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
-            let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
-            self.retry_confirm = Some(RetryConfirm {
-                row,
-                prompt,
-                effort,
-                effort_label,
-                option_id,
-                has_own_checkpoint,
-                later_checkpoints,
-            });
-            window.focus(&self.restore_focus, cx);
-            cx.notify();
-        } else {
-            self.begin_live_retry(row, prompt, option_id, effort, Vec::new(), cx);
-        }
+        let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
+        let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
+        self.retry_confirm = Some(RetryConfirm {
+            row,
+            prompt,
+            effort,
+            effort_label,
+            option_id,
+            has_own_checkpoint,
+            later_checkpoints,
+        });
+        window.focus(&self.restore_focus, cx);
+        cx.notify();
     }
 
     pub(super) fn cancel_retry_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -392,7 +460,7 @@ impl ThreadView {
             .map(|turn| (turn.id, turn.cwd.clone(), turn.before.clone(), review::patch_path(&self.record_id, turn.id)))
             .collect();
         if turns.is_empty() {
-            self.begin_live_retry(pending.row, pending.prompt, pending.option_id, pending.effort, Vec::new(), cx);
+            self.begin_live_retry(pending.row, pending.prompt, pending.option_id, pending.effort, pending.effort_label, Vec::new(), cx);
             cx.notify();
             return;
         }
@@ -404,7 +472,7 @@ impl ThreadView {
                 v.retrying_turn = false;
                 match result {
                     Ok(restored_ids) => {
-                        v.begin_live_retry(pending.row, pending.prompt, pending.option_id, pending.effort, restored_ids, cx);
+                        v.begin_live_retry(pending.row, pending.prompt, pending.option_id, pending.effort, pending.effort_label, restored_ids, cx);
                     }
                     Err(error) => {
                         let at = v.thread.notice(format!("Could not restore checkpoint to retry: {error}"), true);
@@ -417,14 +485,16 @@ impl ThreadView {
         }).detach();
     }
 
-    /// Keep the live session (preserving provider prompt caching), bump `thought_level` in place, and wait for the
-    /// harness to confirm the higher level before dispatching the retry at the front of the queue.
+    /// Keep the live session (preserving provider prompt caching and permission mode), bump `thought_level` in place,
+    /// and wait for the harness to confirm the higher level before dispatching the retry at the front of the queue.
+    #[allow(clippy::too_many_arguments)]
     fn begin_live_retry(
         &mut self,
         row: usize,
         prompt: String,
         option_id: String,
         effort: String,
+        effort_label: String,
         restored_ids: Vec<Uuid>,
         cx: &mut Context<Self>,
     ) {
@@ -443,22 +513,28 @@ impl ThreadView {
         } else {
             format!("Please revisit and retry this earlier request:\n\n{prompt}")
         };
+        let expected_permission = self.handoff_permission();
+        let expected_mode = self.thread.mode.clone();
         self.pending_effort = Some(effort.clone());
         self.pending_retry = Some(PendingRetry {
             option_id: option_id.clone(),
             expected_effort: effort.clone(),
+            effort_label,
             prompt: outgoing,
+            expected_permission,
+            expected_mode,
+            permission_restored: false,
         });
         if self.connection.is_some() && self.session_id.is_some() {
             self.set_option(option_id, effort, cx);
         } else {
             // No live ACP connection (e.g. offline unit tests): enqueue at the front immediately.
-            self.dispatch_pending_retry(true, cx);
+            self.dispatch_pending_retry(cx);
         }
     }
 
-    /// Called once all in-flight session options settle. Verifies that the requested higher thinking level actually
-    /// took effect before sending the retry; cancels the retry if the harness rejected or overrode it.
+    /// Called once all in-flight session options (or permission restoration) settle. Verifies that the requested higher
+    /// thinking level took effect and that the session's permission mode was preserved before sending the retry.
     pub(super) fn complete_pending_retry(&mut self, cx: &mut Context<Self>) {
         let Some(retry) = self.pending_retry.as_ref() else { return };
         let applied = self
@@ -467,25 +543,77 @@ impl ThreadView {
             .iter()
             .find(|o| o.id == retry.option_id)
             .is_some_and(|o| o.current == retry.expected_effort);
-        self.dispatch_pending_retry(applied, cx);
-    }
-
-    fn dispatch_pending_retry(&mut self, applied: bool, cx: &mut Context<Self>) {
-        let Some(retry) = self.pending_retry.take() else { return };
         if !applied {
-            let at = self.thread.notice("Could not switch to higher thinking; retry cancelled.", true);
-            self.remeasure(at);
-            if !self.queue.is_empty() {
-                self.send_next(cx);
-            }
+            self.cancel_pending_retry("Could not switch to higher thinking; retry cancelled.", cx);
             return;
         }
+        let expected_permission = retry.expected_permission;
+        let expected_mode = retry.expected_mode.clone();
+        let permission_restored = retry.permission_restored;
+        let mode_drifted = expected_permission.is_some_and(|wanted| {
+            self.handoff_permission() != Some(wanted)
+                || (expected_mode.is_some() && self.thread.mode != expected_mode)
+        });
+        if mode_drifted {
+            let Some(wanted) = expected_permission else { return };
+            if permission_restored || self.connection.is_none() || self.session_id.is_none() {
+                self.cancel_pending_retry("Could not preserve permission mode; retry cancelled.", cx);
+                return;
+            }
+            if let Some(pending) = self.pending_retry.as_mut() {
+                pending.permission_restored = true;
+            }
+            self.set_permission(wanted, cx);
+            if self.permission_changing {
+                return;
+            }
+            if self.handoff_permission() != Some(wanted) {
+                self.cancel_pending_retry("Could not preserve permission mode; retry cancelled.", cx);
+                return;
+            }
+        }
+        self.dispatch_pending_retry(cx);
+    }
+
+    pub(super) fn cancel_pending_retry(&mut self, message: &str, cx: &mut Context<Self>) {
+        if self.pending_retry.take().is_none() {
+            return;
+        }
+        let at = self.thread.notice(message, true);
+        self.remeasure(at);
+        if !self.queue.is_empty() {
+            self.send_next(cx);
+        }
+    }
+
+    fn dispatch_pending_retry(&mut self, cx: &mut Context<Self>) {
+        let Some(retry) = self.pending_retry.take() else { return };
         let mut item = Queued::new(retry.prompt, true);
         item.ahead = true;
         item.order = queue::next_order();
+        item.notice = Some(UserNotice::ResentHigherThinking { effort: retry.effort_label });
         self.queue.push_front(item);
         self.queue_changed();
         self.send_next(cx);
+    }
+
+    pub(super) fn render_user_header(&self, row: usize) -> Option<AnyElement> {
+        let ordinal = visible_user_ordinal(&self.thread.entries, row)?;
+        let notice = self.user_notices.get(&ordinal)?;
+        Some(
+            div()
+                .w_full()
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(4.0))
+                .text_size(scale::px(11.0))
+                .text_color(theme().subtle_foreground)
+                .child(icon(notice.icon(), 11.5))
+                .child(notice.text())
+                .into_any_element(),
+        )
     }
 
     pub(super) fn render_user_footer(&self, row: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -565,6 +693,8 @@ impl ThreadView {
         let clear = cx.entity().downgrade();
         let later = pending.later_checkpoints;
         let plural = if later == 1 { "turn" } else { "turns" };
+        let restores_files = pending.has_own_checkpoint || later > 0;
+        let title = if restores_files { "Restore checkpoint & retry?" } else { "Retry with higher thinking?" };
         let detail = match (pending.has_own_checkpoint, later) {
             (true, 0) => format!(
                 "This restores files changed in this turn back to before your message, then retries with {} thinking. Restore is blocked if those files changed since.",
@@ -574,12 +704,25 @@ impl ThreadView {
                 "This restores files changed in this turn and {n} later {plural} back to before your message, then retries with {} thinking. Restore is blocked if those files changed since.",
                 pending.effort_label,
             ),
+            (false, 0) => format!(
+                "This switches thinking to {} and resends your message. No file checkpoints will be reverted.",
+                pending.effort_label,
+            ),
             (false, n) => format!(
                 "This restores files changed in {n} later {plural} back to before your message, then retries with {} thinking. Restore is blocked if those files changed since.",
                 pending.effort_label,
             ),
         };
-        let confirm_label = format!("Restore & retry ({})", pending.effort_label);
+        let confirm_label = if restores_files {
+            format!("Restore & retry ({})", pending.effort_label)
+        } else {
+            format!("Retry ({})", pending.effort_label)
+        };
+        let (confirm_bg, confirm_hover) = if restores_files {
+            (theme().destructive, theme().destructive.opacity(0.8))
+        } else {
+            (theme().primary, theme().primary_hover)
+        };
         Some(
             AlertDialog::new(cx)
                 .focus_handle(self.restore_focus.clone())
@@ -605,7 +748,7 @@ impl ThreadView {
                             AlertDialogTitle::new()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(scale::px(16.0))
-                                .child("Restore checkpoint & retry?"),
+                                .child(title),
                         )
                         .child(AlertDialogDescription::new().text_color(theme().muted_foreground).child(detail))
                         .child(
@@ -624,9 +767,9 @@ impl ThreadView {
                                         "retry-confirm",
                                         None,
                                         confirm_label,
-                                        theme().destructive,
+                                        confirm_bg,
                                         theme().background,
-                                        theme().destructive.opacity(0.8),
+                                        confirm_hover,
                                         None,
                                         true,
                                     )
@@ -664,6 +807,18 @@ mod tests {
 
         clear_timestamps("user-ts-test");
         assert!(load_timestamps("user-ts-test").is_empty());
+    }
+
+    #[test]
+    fn notices_persist_and_clear() {
+        let _dirs = crate::datadir::use_throwaway_folders();
+        let mut map = BTreeMap::new();
+        map.insert(1, UserNotice::ResentHigherThinking { effort: "High".into() });
+        save_notices("user-notice-test", &map);
+        assert_eq!(load_notices("user-notice-test"), map);
+
+        clear_notices("user-notice-test");
+        assert!(load_notices("user-notice-test").is_empty());
     }
 
     #[test]

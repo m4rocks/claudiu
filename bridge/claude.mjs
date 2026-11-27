@@ -683,6 +683,9 @@ const handlers = {
     } else if (p.configId === "effort") {
       await s.query.applyFlagSettings({ effortLevel: p.value === "default" ? null : p.value });
       s.effort = p.value;
+      if (s.mode && s.mode !== "default") {
+        await s.query.setPermissionMode(s.mode);
+      }
     } else {
       throw new Error(`No setting called ${p.configId}.`);
     }

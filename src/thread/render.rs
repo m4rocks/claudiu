@@ -449,6 +449,7 @@ impl ThreadView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
+                    .children(self.render_user_header(ix))
                     .child(bubble)
                     .children(self.render_user_footer(ix, cx))
                     .into_any_element()
