@@ -312,8 +312,8 @@ fn removing_a_worktree_when_its_session_ends() {
     let own_x = ws.read_with(&cx, |ws, _| ws.git_picker().and_then(|p| p.worktrees[1].remove.clone()));
     let Some(x) = own_x else { panic!("no x on the worktree's row") };
     step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
-    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
-    assert!(toast.as_deref().is_some_and(|t| t.contains("is in fix. Switch it to main first.")), "{toast:?}");
+    let toasts = ws.read_with(&cx, |ws, _| ws.visible_toasts().map(|t| t.text.clone()).collect::<Vec<_>>());
+    assert!(toasts.iter().any(|t| t.contains("is in fix. Switch it to main first.")), "{toasts:?}");
     assert!(folder.exists() && ws.read_with(&cx, |ws, _| ws.modal.is_none() && ws.live.len() == 1), "nothing changes");
 
     // Ending the session by itself offers the removal.
@@ -321,8 +321,8 @@ fn removing_a_worktree_when_its_session_ends() {
     wait(&mut cx, "the offer", &|ws| matches!(&ws.modal, Some(Modal::Confirm { act: Act::ConfirmRemoveWorktree { .. }, .. })));
     step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
     wait(&mut cx, "the folder to go", &|_| !folder.exists());
-    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
-    assert!(toast.as_deref().is_some_and(|t| t.contains("Removed worktree fix")), "{toast:?}");
+    let toasts = ws.read_with(&cx, |ws, _| ws.visible_toasts().map(|t| t.text.clone()).collect::<Vec<_>>());
+    assert!(toasts.iter().any(|t| t.contains("Removed worktree fix")), "{toasts:?}");
     assert!(!git(&["rev-parse", "--verify", "-q", "worktree-fix"]).status.success(), "the merged branch went with it");
 
     // The same dialog lists branches and puts an x on every local branch except the current one.

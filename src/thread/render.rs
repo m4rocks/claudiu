@@ -495,7 +495,8 @@ impl ThreadView {
                 if ix + 1 == self.thread.entries.len() && self.error.is_some() => {
                     self.render_error_notice(format!("{text} {}", self.error.as_deref().unwrap_or_default()), cx).into_any_element()
                 },
-            Entry::Notice { text, .. } if ix + 1 == self.thread.entries.len()
+            Entry::Notice { text, event: None, .. } if ix + 1 == self.thread.entries.len()
+                && self.thread.active_notice(crate::harness::thread::NoticeKind::Handoff).is_none()
                 && crate::harness::limits::looks_like_usage_limit_error(text) => self.render_usage_notice(text.clone(), cx).into_any_element(),
             Entry::Notice { text, error, .. } => crate::panels::ui::notice::notice(
                 text.clone(),
@@ -1186,62 +1187,11 @@ impl ThreadView {
         for (i, opt) in q.options.iter().enumerate() {
             let lit = i == q.highlight;
             let checked = multi && q.selected.contains(&i);
-            let row = div()
-                .id(SharedString::from(format!("thread-perm-{question_id}-{i}")))
-                .w_full()
-                .px(px(10.0))
-                .py(px(8.0))
-                .rounded(px(7.0))
-                .bg(if lit || checked { theme().row_active } else { theme().background })
-                .border_1()
-                .border_color(if lit || checked { theme().ring } else { theme().panel_border })
-                .cursor_pointer()
+            let row = ui::question::option(SharedString::from(format!("thread-perm-{question_id}-{i}")),
+                opt.name.clone(), opt.description.clone(), multi, checked, lit, Some(i + 1))
                 .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                    if *hovered {
-                        v.highlight_option(i, cx);
-                    }
+                    if *hovered { v.highlight_option(i, cx); }
                 }))
-                .flex()
-                .items_start()
-                .gap(px(10.0))
-                .when(multi, |row| {
-                    row.child(
-                        div()
-                            .mt(px(2.0))
-                            .flex_none()
-                            .size(px(15.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(if checked { theme().primary } else { theme().panel_border })
-                            .bg(if checked { theme().primary } else { theme().background })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 11.0).text_color(theme().background))),
-                    )
-                })
-                .child(div().pt(px(1.0)).child(kbd(format!("{}", i + 1))))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_size(scale::px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme().foreground)
-                                .child(opt.name.clone()),
-                        )
-                        .children(opt.description.clone().map(|desc| {
-                            div()
-                                .text_size(scale::px(11.5))
-                                .text_color(theme().muted_foreground)
-                                .child(desc)
-                        })),
-                )
                 .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                     if multi {
                         v.toggle_question_option(question_id, i, cx);
@@ -1254,31 +1204,11 @@ impl ThreadView {
         }
         let pending_count = self.pending_question_count();
         let footer = if multi {
-            let submit_label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
-            let submit_btn = if selected_count > 0 {
-                btn::colored(
-                    "thread-question-submit",
-                    Some(IconName::Check),
-                    &submit_label,
-                    theme().primary,
-                    theme().background,
-                    theme().primary_hover,
-                    None,
-                    true,
-                )
+            let submit_btn = ui::question::submit("thread-question-submit", selected_count)
                 .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                     v.submit_multi_question(question_id, cx);
                     v.focus_composer(window, cx);
-                }))
-                .h(px(24.0))
-                .px(px(10.0))
-                .into_any_element()
-            } else {
-                btn::disabled_leading("thread-question-submit", Some(IconName::Check), &submit_label)
-                    .h(px(24.0))
-                    .px(px(10.0))
-                    .into_any_element()
-            };
+                }));
             div()
                 .flex()
                 .items_center()
@@ -1476,7 +1406,6 @@ impl ThreadView {
             22,
             body,
             Some(choices),
-            ui::popover::ArrowNav::Enabled,
             |v: &mut Self, window, cx| v.close_picker(window, cx),
             window,
             cx,

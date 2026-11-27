@@ -66,6 +66,7 @@ mod subagents;
 pub use subagents::SubagentState;
 mod settings;
 mod setup;
+pub(crate) use setup::parse_path as parse_executable_path;
 mod skills;
 mod titles;
 mod switch;
@@ -223,6 +224,7 @@ pub enum Modal {
 pub struct HarnessDialog {
     pub harness: Harness,
     pub search: Entity<InputState>,
+    pub focus: FocusHandle,
 }
 
 /// The Harnesses page of the Settings dialog, as edited so far.
@@ -516,6 +518,7 @@ pub struct ShellDrag {
 }
 
 pub struct Toast {
+    pub tone: crate::panels::ui::alert::Tone,
     pub text: String,
     pub serial: u64,
     /// Button label and what it does; the toast stays up longer so there is time to answer.
@@ -578,6 +581,9 @@ pub struct Workspace {
     pub menu_nav: crate::panels::ui::command::Nav,
     pub modal: Option<Modal>,
     pub modal_focus: FocusHandle,
+    pub modal_tab_cycle: modal::DialogTabCycle,
+    pub harness_tab_cycle: modal::DialogTabCycle,
+    picker_return_focus: Option<FocusHandle>,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
     pub settings_page: SettingsPage,
     /// What the Worktrees page of Settings shows. Not saved to disk.
@@ -591,7 +597,9 @@ pub struct Workspace {
     pub menu: Option<Menu>,
     /// Active universal anchored picker dropdown (model, project, branch & worktree, settings, scope, editor).
     pub picker: Option<AnchoredPicker>,
-    pub toast: Option<Toast>,
+    toast: Option<Toast>,
+    pub(crate) executable_errors: HashMap<gpui::EntityId, String>,
+    toast_queue: std::collections::VecDeque<Toast>,
     pub toast_serial: u64,
     /// Requests from sessions to other sessions, waiting for the user's answer.
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
@@ -755,6 +763,9 @@ impl Workspace {
             menu_nav: crate::panels::ui::command::Nav::new(cx),
             modal: None,
             modal_focus: cx.focus_handle(),
+            modal_tab_cycle: modal::DialogTabCycle::new(window, cx),
+            harness_tab_cycle: modal::DialogTabCycle::new(window, cx),
+            picker_return_focus: None,
             settings_page: SettingsPage::default(),
             worktrees_page: Default::default(),
             skills_page: Default::default(),
@@ -763,6 +774,8 @@ impl Workspace {
             menu: None,
             picker: None,
             toast: None,
+            executable_errors: HashMap::new(),
+            toast_queue: Default::default(),
             toast_serial: 0,
             ephemeral: HashSet::new(),
             closed: vec![],
@@ -999,6 +1012,7 @@ impl Workspace {
         self.menu = None;
         self.picker_nav.reset();
         if !kind.has_search() {
+            if self.picker.is_none() { self.picker_return_focus = window.focused(cx); }
             self.picker_nav.focus(window, cx);
         }
         self.picker = Some(AnchoredPicker { at, kind });
@@ -1007,6 +1021,7 @@ impl Workspace {
 
     /// Hand the keyboard back to what a closing dropdown sat over: an open dialog, or else the shown session.
     pub(crate) fn focus_under_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = &self.picker_return_focus { window.focus(focus, cx); return; }
         match &self.modal {
             Some(Modal::Settings { list_focus, .. }) => window.focus(list_focus, cx),
             Some(_) => window.focus(&self.modal_focus, cx),
@@ -1026,7 +1041,8 @@ impl Workspace {
     }
 
     /// Create a focused search input for a universal picker dropdown that triggers live re-filtering as you type.
-    pub(crate) fn picker_search(&self, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    pub(crate) fn picker_search(&mut self, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        if self.picker.is_none() { self.picker_return_focus = window.focused(cx); }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         cx.subscribe_in(&input, window, |_: &mut Self, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {

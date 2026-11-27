@@ -2,7 +2,7 @@
 //! The pages that list things to act on (Projects, Harnesses) are in `settings_pages`.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     ParentElement, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder,
     px,
 };
@@ -13,8 +13,6 @@ use crate::app::{
     Act, Modal,
     SettingsPage, Workspace, WorkspacePicker,
 };
-use gpui_kit::component::input::Input;
-use crate::panels::logos;
 use crate::panels::ui::toggle_group::toggle_group;
 use crate::panels::theme::theme;
 use crate::updater::Status;
@@ -26,18 +24,19 @@ use crate::panels::ui::button as btn;
 use crate::panels::ui::kbd::kbd;
 use crate::panels::ui::label::section_label;
 use crate::panels::ui::popover;
+use gpui_kit::base::FocusTrapElement;
 
 /// Split-pane Settings window: left navigation rail with icons + version footer, right scrollable page with grouped
-/// section cards and a dedicated Save/Cancel action bar.
+/// section cards and a footer explaining when changes apply.
 pub(super) fn render_settings_card(
     ws: &Workspace,
     viewport: gpui::Size<gpui::Pixels>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-) -> gpui::Stateful<gpui::Div> {
+) -> AnyElement {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
     let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, notify_model_on_limit, auto_handoff_on_limit, auto_handoff_model, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
-        return div().id("modal-card");
+        return div().id("modal-card").into_any_element();
     };
     let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, notify_model_on_limit, auto_handoff_on_limit) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display, *notify_model_on_limit, *auto_handoff_on_limit);
     let scaled = crate::panels::scale::px;
@@ -96,16 +95,7 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
                 )
                 .into_any_element(),
-                div()
-                    .id("settings-auto-compact")
-                    .px(px(14.0))
-                    .py(px(11.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme().accent))
+                crate::panels::ui::switch::row("settings-auto-compact")
                     .child(row_labels("Auto-compact", Some("Keep long conversations trim by compacting context between turns")))
                     .child(switch(auto_compact))
                     .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
@@ -131,25 +121,16 @@ pub(super) fn render_settings_card(
                             .bg(theme().background)
                             .border_1()
                             .border_color(theme().panel_border)
-                            .child(compaction_step("compact-threshold-down", "−", -(crate::harness::compaction::THRESHOLD_STEP as i64), cx))
+                            .child(compaction_step("compact-threshold-down", "−", -(crate::harness::compaction::THRESHOLD_STEP as i64), auto_compact_threshold, cx))
                             .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(theme().foreground).child(format!("{auto_compact_threshold}%")))
-                            .child(compaction_step("compact-threshold-up", "+", crate::harness::compaction::THRESHOLD_STEP as i64, cx))
+                            .child(compaction_step("compact-threshold-up", "+", crate::harness::compaction::THRESHOLD_STEP as i64, auto_compact_threshold, cx))
                             .into_any_element(),
                     )
                     .into_any_element(),
                 );
             }
             chat_rows.push(
-                div()
-                    .id("settings-notify-model-on-limit")
-                    .px(px(14.0))
-                    .py(px(11.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme().accent))
+                crate::panels::ui::switch::row("settings-notify-model-on-limit")
                     .child(row_labels("Notify model near usage limit", Some("Send a one-time heads-up to the model when usage reaches 90%")))
                     .child(switch(notify_model_on_limit))
                     .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
@@ -161,16 +142,7 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
             );
             chat_rows.push(
-                div()
-                    .id("settings-auto-handoff")
-                    .px(px(14.0))
-                    .py(px(11.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme().accent))
+                crate::panels::ui::switch::row("settings-auto-handoff")
                     .child(row_labels("Auto-handoff at usage limit", Some("Hand off automatically to another model when the current one hits its limit")))
                     .child(switch(auto_handoff_on_limit))
                     .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
@@ -241,17 +213,8 @@ pub(super) fn render_settings_card(
                     .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::CheckForUpdates, window, cx)))
                     .into_any_element()
             };
-            let updates_row = div()
-                .id("settings-updates")
-                .px(px(14.0))
-                .py(px(11.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(12.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme().accent))
-                .child(row_labels("Automatic updates", Some("Automatically check for new releases in the background")))
+            let updates_row = crate::panels::ui::switch::row("settings-updates")
+                    .child(row_labels("Automatic updates", Some("Automatically check for new releases in the background")))
                 .child(
                     div()
                         .flex_none()
@@ -273,7 +236,7 @@ pub(super) fn render_settings_card(
                 row_shell(
                     "Shell",
                     Some("Shell executable for the integrated terminal"),
-                    div().w(px(230.0)).flex_none().child(Input::new(shell).h(px(28.0)).text_size(scaled(12.0))).into_any_element(),
+                    div().w(px(230.0)).flex_none().child(crate::panels::settings_pages::executable_field(shell, ws)).into_any_element(),
                 )
                 .into_any_element(),
                 row_shell(
@@ -304,16 +267,7 @@ pub(super) fn render_settings_card(
                 .into_iter()
                 .map(|feature| {
                     let on = !m4code_off.contains(&feature);
-                    div()
-                        .id(("settings-m4code", feature as usize))
-                        .px(px(14.0))
-                        .py(px(11.0))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme().accent))
+                    crate::panels::ui::switch::row(("settings-m4code", feature as usize))
                         .child(row_labels(feature.label(), Some(feature.description())))
                         .child(switch(on))
                         .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
@@ -339,12 +293,12 @@ pub(super) fn render_settings_card(
             .flex_col()
             .gap(px(20.0))
             .child(ws.projects_section(renaming.as_ref(), cx))
-            .child(worktrees_section(worktrees, cx))
+            .child(worktrees_section(worktrees, window, cx))
             .into_any_element(),
     };
 
     let nav = SettingsPage::ALL.into_iter().enumerate().fold(
-        div().id("settings-categories").track_focus(list_focus).flex().flex_col().gap(px(2.0)),
+        div().id("settings-categories").track_focus(&list_focus.clone().tab_stop(true)).flex().flex_col().gap(px(2.0)),
         |list, (i, p)| {
             let selected = p == page;
             let focus = list_focus.clone();
@@ -439,7 +393,7 @@ pub(super) fn render_settings_card(
             div()
                 .text_size(scaled(11.0))
                 .text_color(theme().subtle_foreground)
-                .child("Changes save automatically"),
+                .child("Preferences save when you close Settings"),
         );
 
     let main_pane = div()
@@ -463,8 +417,8 @@ pub(super) fn render_settings_card(
         )
         .child(footer);
 
-    popover::dialog("modal-card", popover::ArrowNav::Enabled)
-        .track_focus(&ws.modal_focus)
+    popover::dialog("modal-card")
+        .tab_group()
         .w(scaled(880.0).min(viewport.width - px(48.0)))
         .h(scaled(620.0).min(viewport.height - px(48.0)))
         .overflow_hidden()
@@ -475,8 +429,12 @@ pub(super) fn render_settings_card(
                 ws.act(Act::Dismiss, window, cx);
             }
         }))
+        .child(popover::tab_boundary("settings-tab-start", &ws.modal_tab_cycle.start))
         .child(sidebar)
         .child(main_pane)
+        .child(popover::tab_boundary("settings-tab-end", &ws.modal_tab_cycle.end))
+        .focus_trap("settings-focus", &ws.modal_focus)
+        .into_any_element()
 }
 
 fn row_labels(title: &str, subtitle: Option<&str>) -> gpui::Div {
@@ -519,7 +477,7 @@ fn keyboard_page() -> gpui::Div {
 }
 
 /// The Worktrees section on the Projects page: worktree folders m4code made, grouped by repository.
-fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
+fn worktrees_section(page: &crate::app::WorktreesPage, window: &mut Window, cx: &mut Context<Workspace>) -> gpui::Div {
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(theme().subtle_foreground).child(text);
     let reveal = if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Explorer" };
@@ -606,13 +564,19 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
             match asked {
                 None => row,
                 Some(asked) => {
+                    if asked.focus_pending.replace(false) {
+                        let focus = asked.cancel_focus.clone();
+                        cx.on_next_frame(window, move |ws, window, cx| {
+                            if ws.worktrees_page.asking.as_ref().is_some_and(|asked| asked.cancel_focus == focus) { window.focus(&focus, cx); }
+                        });
+                    }
                     let act = asked.act.clone();
                     let confirm = if asked.danger { btn::destructive(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { btn::text(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
                     row.child(faint(asked.body.clone())).child(
                         div()
                             .flex()
                             .gap(px(6.0))
-                            .child(btn::text(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
+                            .child(btn::text(format!("worktree-cancel-{i}"), "Cancel", false).track_focus(&asked.cancel_focus).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
                                 ws.worktrees_page.asking = None;
                                 cx.notify();
                             })))
@@ -633,48 +597,9 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
 
 /// Default model row inside the New sessions card; clicking opens the universal model dropdown anchored to its pill.
 fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let scaled = crate::panels::scale::px;
-    let accent = theme().primary;
-    let row_anchor = Anchor::default();
-    let pill_anchor = Anchor::default();
-    div()
-        .id("settings-default-model")
-        .relative()
-        .px(px(14.0))
-        .py(px(11.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().accent))
-        .child(row_anchor.probe())
-        .child(row_labels("Default model", Some("Model used when starting a new session")))
-        .child(
-            div()
-                .relative()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(9.0))
-                .h(px(26.0))
-                .rounded(px(6.0))
-                .bg(if open { theme().row_active } else { theme().background })
-                .border_1()
-                .border_color(if open { theme().primary } else { theme().panel_border })
-                .child(pill_anchor.probe())
-                .child(logos::draw(logos::for_harness(current.harness), 11.5, theme().muted_foreground))
-                .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scaled(12.0)).text_color(accent).child(current.name.clone()))
-                .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground)),
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                ws.open_settings_model_picker(pill_anchor.below_right().with_hit(row_anchor.bounds()), crate::app::SettingsModelTarget::Default, window, cx);
-            }),
-        )
+    settings_picker_row("settings-default-model", ("Default model", "Model used when starting a new session"),
+        format!("{}: {}", current.harness.name(), current.name), open,
+        |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::Default, window, cx), cx)
 }
 
 fn settings_picker_row(
@@ -688,8 +613,7 @@ fn settings_picker_row(
     let scaled = crate::panels::scale::px;
     let row_anchor = Anchor::default();
     let pill_anchor = Anchor::default();
-    div()
-        .id(id)
+    btn::focusable(id)
         .relative()
         .px(px(14.0))
         .py(px(11.0))
@@ -719,57 +643,30 @@ fn settings_picker_row(
                 .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme().primary).child(current))
                 .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground)),
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                on_open(ws, pill_anchor.below_right().with_hit(row_anchor.bounds()), window, cx);
-            }),
-        )
+        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            on_open(ws, pill_anchor.below_right().with_hit(row_anchor.bounds()), window, cx);
+        }))
 }
 
 /// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.
-fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<Workspace>) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(22.0))
-        .h(px(22.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .text_color(theme().muted_foreground)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
-        .child(label)
-        .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
-            if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
-                *scale = (*scale as i32 + by).clamp(crate::panels::scale::MIN as i32, crate::panels::scale::MAX as i32) as u32;
-                crate::panels::scale::set(*scale);
-            }
-            cx.notify();
-        }))
+fn step_button(id: &'static str, label: &'static str, enabled: bool, apply: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> gpui_kit::base::Button {
+    btn::button(id, None, label, btn::Variant::Ghost, btn::Size::Icon)
+        .disabled(!enabled)
+        .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| { apply(ws, cx); cx.notify(); }))
 }
 
-/// A − / + button in the Settings modal that moves the auto-compact threshold by `by` percent.
-fn compaction_step(id: &'static str, label: &'static str, by: i64, cx: &mut Context<Workspace>) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(22.0))
-        .h(px(22.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .text_color(theme().muted_foreground)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
-        .child(label)
-        .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
-            if let Some(Modal::Settings { auto_compact_threshold, .. }) = ws.modal.as_mut() {
-                let next = (*auto_compact_threshold as i64 + by).max(0) as u64;
-                *auto_compact_threshold = crate::harness::compaction::clamp_threshold(next);
-            }
-            cx.notify();
-        }))
+fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let current = crate::panels::scale::percent();
+    let next = (current as i32 + by).clamp(crate::panels::scale::MIN as i32, crate::panels::scale::MAX as i32) as u32;
+    step_button(id, label, next != current, move |ws, _| {
+        if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() { *scale = next; crate::panels::scale::set(next); }
+    }, cx)
+}
+
+fn compaction_step(id: &'static str, label: &'static str, by: i64, current: u64, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let next = crate::harness::compaction::clamp_threshold((current as i64 + by).max(0) as u64);
+    step_button(id, label, next != current, move |ws, _| {
+        if let Some(Modal::Settings { auto_compact_threshold, .. }) = ws.modal.as_mut() { *auto_compact_threshold = next; }
+    }, cx)
 }

@@ -628,6 +628,6 @@ impl Workspace {
             }
         };
 
-        Some(picker::dropdown_overlay((id, title), at, priority, body, choices, crate::panels::ui::popover::ArrowNav::Enabled, |ws: &mut Self, window, cx| ws.dismiss_picker(window, cx), window, cx))
+        Some(picker::dropdown_overlay((id, title), at, priority, body, choices, |ws: &mut Self, window, cx| ws.dismiss_picker(window, cx), window, cx))
     }
 }

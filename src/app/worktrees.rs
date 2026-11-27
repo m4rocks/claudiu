@@ -22,6 +22,8 @@ pub struct Asked {
     pub folder: PathBuf,
     pub body: String,
     pub confirm: String,
+    pub cancel_focus: gpui::FocusHandle,
+    pub focus_pending: std::cell::Cell<bool>,
     pub danger: bool,
     pub act: Act,
 }
@@ -298,7 +300,7 @@ impl Workspace {
                 Ok((left, owned)) => {
                     let (title, body, confirm, danger) = removal_question(&name, &folder, owned, left);
                     let act = Act::ConfirmRemoveWorktree { main_checkout, folder: folder.clone(), discard: left.files > 0 };
-                    ws.show_removal_question(folder, title, body, confirm, danger, act);
+                    ws.show_removal_question(folder, (title, body, confirm, danger), act, cx);
                     cx.notify();
                 }
                 Err(e) => ws.toast(e, cx),
@@ -314,13 +316,14 @@ impl Workspace {
         }
         let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let body = "Git no longer lists this worktree, so m4code cannot say what is in it. The folder and everything in it will be deleted.".to_string();
-        self.show_removal_question(folder.clone(), format!("Delete the folder {name}?"), body, "Delete".into(), true, Act::ConfirmDeleteUnlisted(folder));
+        self.show_removal_question(folder.clone(), (format!("Delete the folder {name}?"), body, "Delete".into(), true), Act::ConfirmDeleteUnlisted(folder), cx);
         cx.notify();
     }
 
-    fn show_removal_question(&mut self, folder: PathBuf, title: String, body: String, confirm: String, danger: bool, act: Act) {
+    fn show_removal_question(&mut self, folder: PathBuf, (title, body, confirm, danger): (String, String, String, bool), act: Act, cx: &mut Context<Self>) {
         if matches!(self.modal, Some(Modal::Settings { .. })) {
-            self.worktrees_page.asking = Some(Asked { folder, body, confirm, danger, act });
+            self.worktrees_page.asking = Some(Asked { folder, body, confirm, danger, act,
+                cancel_focus: cx.focus_handle(), focus_pending: std::cell::Cell::new(true) });
         } else {
             self.modal = Some(Modal::Confirm { title, body, confirm, danger, act });
         }

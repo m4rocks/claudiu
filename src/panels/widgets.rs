@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gpui::{
     Anchor as Corner, Bounds, Canvas, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div, point, px,
+    Styled, Window, canvas, div, point, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -165,8 +165,8 @@ pub fn effort_slider<V: 'static>(
         let is_sel = selected == Some(i);
         let pick = on_pick.clone();
         label_row = label_row.child(
-            div()
-                .id(SharedString::from(format!("{id}-lbl-{i}")))
+            crate::panels::ui::button::focusable(SharedString::from(format!("{id}-lbl-{i}")))
+                .accessibility_label(format!("Reasoning effort: {label}"))
                 .cursor_pointer()
                 .text_size(crate::panels::scale::px(10.5))
                 .font_weight(if is_sel { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })

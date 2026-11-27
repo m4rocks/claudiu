@@ -911,11 +911,11 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     };
 
     // The GitHub shortcut works on Home and uses the selected project.
-    step(&mut cx, &|ws, _, _| {
+    step(&mut cx, &|ws, _, cx| {
         ws.main = Main::Home;
         ws.active = None;
         ws.home.project = Some(project.clone());
-        ws.toast = None;
+        while ws.toast.is_some() { ws.dismiss_toast(cx); }
     });
     cx.dispatch_action(window, OpenGithub);
     cx.run_until_parked();
@@ -938,6 +938,9 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     let (code, toast) = ws.read_with(&cx, |ws, _| (ws.store.session(&bad).map(|s| s.exit_code), ws.toast.as_ref().map(|t| t.text.clone())));
     assert_eq!(code, Some(Some(1)));
     assert_eq!(toast.as_deref(), Some("Broken ended (exit code 1)"));
+
+    // Each exit keeps its feedback until it is dismissed or expires; consume this one before checking the next.
+    step(&mut cx, &|ws, _, cx| ws.dismiss_toast(cx));
 
     let missing = new_id();
     let record = SessionRecord {

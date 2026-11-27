@@ -707,18 +707,7 @@ fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) ->
 
 /// The row as it looks while its action is unavailable: no hover, no pointer (give it no click handler either).
 fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> gpui_kit::base::Button {
-    gpui_kit::base::Button::new(id.into())
-        .disabled(true)
-        .h(px(26.0))
-        .px(px(8.0))
-        .justify_start()
-        .gap(px(8.0))
-        .rounded(px(6.0))
-        .text_size(crate::panels::scale::px(12.5))
-        .text_color(theme().subtle_foreground)
-        .cursor_default()
-        .child(div().flex_none().text_color(theme().muted_foreground).child(icon(glyph, 14.0)))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(label))
+    row(id, glyph, label).disabled(true)
 }
 
 /// A list row that does something when clicked and has a × that removes the entry.

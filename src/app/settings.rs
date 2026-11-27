@@ -210,7 +210,7 @@ impl Workspace {
     pub(crate) fn open_harness_dialog(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
         let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
         if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
-            subagents.picking = Some(HarnessDialog { harness, search });
+            subagents.picking = Some(HarnessDialog { harness, search, focus: cx.focus_handle() });
         }
         self.load_models(cx);
     }
@@ -228,7 +228,7 @@ impl Workspace {
     }
 
     /// Keys for the open Settings dialog, seen before the focused control. Up and Down change the page and Enter saves
-    /// only while the category list has focus; Tab and Shift+Tab cycle the list and the current page's text fields.
+    /// only while the category list has focus. Tab uses the native focus order for every control.
     pub(crate) fn settings_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // The popup over Harnesses closes on Escape without closing Settings itself.
         if self.harness_dialog_open() {
@@ -246,18 +246,15 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(Modal::Settings { shell, skill_search, skill_filter, list_focus, renaming, .. }) = &self.modal else { return };
-        let list_focus = list_focus.clone();
-        let fields = match self.settings_page {
-            SettingsPage::General => vec![shell.clone()],
-            SettingsPage::Skills => vec![match self.skills_page.tab {
-                SkillsTab::Installed => skill_filter.clone(),
-                SkillsTab::Browse => skill_search.clone(),
-            }],
-            SettingsPage::Projects => renaming.iter().map(|(_, name)| name.clone()).collect(),
-            _ => Vec::new(),
-        };
+        let Some(Modal::Settings { list_focus, .. }) = &self.modal else { return };
         let on_list = list_focus.is_focused(window);
+        if self.worktrees_page.asking.is_some() {
+            let handled = match ev.keystroke.key.as_str() {
+                "escape" => { self.worktrees_page.asking = None; true }
+                _ => false,
+            };
+            if handled { cx.stop_propagation(); cx.notify(); return; }
+        }
         if self.settings_page == SettingsPage::Skills && self.picker.is_none()
             && matches!(ev.keystroke.key.as_str(), "pageup" | "pagedown")
             && ev.keystroke.modifiers.control
@@ -275,20 +272,6 @@ impl Workspace {
             "up" if on_list => self.set_settings_page(self.settings_page.prev(), cx),
             "down" if on_list => self.set_settings_page(self.settings_page.next(), cx),
             "enter" if on_list => self.submit_modal(window, cx),
-            "tab" => {
-                let here = if on_list {
-                    Some(0)
-                } else {
-                    fields.iter().position(|f| f.focus_handle(cx).is_focused(window)).map(|i| i + 1)
-                };
-                let Some(here) = here else { return };
-                let stops = fields.len() + 1;
-                let there = if ev.keystroke.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
-                match there.checked_sub(1) {
-                    None => window.focus(&list_focus, cx),
-                    Some(i) => fields[i].update(cx, |s, cx| s.focus(window, cx)),
-                }
-            }
             _ => return,
         }
         cx.stop_propagation();

@@ -3,31 +3,104 @@
 use super::*;
 use crate::panels::widgets::Dropdown;
 
+/// Boundary stops wrap inside a dialog without visiting workspace controls behind it.
+pub struct DialogTabCycle {
+    pub start: FocusHandle,
+    pub end: FocusHandle,
+}
+
+impl DialogTabCycle {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
+        let start = cx.focus_handle().tab_stop(true);
+        let end = cx.focus_handle().tab_stop(true);
+        let last = end.clone();
+        cx.on_focus(&start, window, move |_, window, cx| {
+            if window.modifiers().shift {
+                window.focus(&last, cx);
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+        }).detach();
+        let first = start.clone();
+        cx.on_focus(&end, window, move |_, window, cx| {
+            if window.modifiers().shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus(&first, cx);
+                window.focus_next(cx);
+            }
+        }).detach();
+        Self { start, end }
+    }
+}
+
 impl Workspace {
+    pub(crate) fn visible_toasts(&self) -> impl Iterator<Item = &Toast> { self.toast.iter().chain(self.toast_queue.iter()) }
+
+    pub(super) fn executable_input(&mut self, value: &str, placeholder: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        let input = self.modal_input(value, placeholder, window, cx);
+        self.validate_executable_input(&input, cx);
+        cx.subscribe(&input, |ws, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                ws.validate_executable_input(&input, cx);
+                cx.notify();
+            }
+        }).detach();
+        input
+    }
+
+    fn validate_executable_input(&mut self, input: &Entity<InputState>, cx: &Context<Self>) {
+        match super::parse_executable_path(input.read(cx).value().as_ref()) {
+            Ok(_) => { self.executable_errors.remove(&input.entity_id()); }
+            Err(message) => { self.executable_errors.insert(input.entity_id(), message); }
+        }
+    }
+
     pub fn toast(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.show_toast(text.into(), None, cx);
     }
 
     pub(super) fn show_toast(&mut self, text: String, action: Option<(String, Act)>, cx: &mut Context<Self>) {
+        self.enqueue_toast(text, action, crate::panels::ui::alert::Tone::Default, cx);
+    }
+
+    pub(crate) fn error_toast(&mut self, text: String, cx: &mut Context<Self>) {
+        self.enqueue_toast(text, None, crate::panels::ui::alert::Tone::Destructive, cx);
+    }
+
+    fn enqueue_toast(&mut self, text: String, action: Option<(String, Act)>, tone: crate::panels::ui::alert::Tone, cx: &mut Context<Self>) {
+        let previous = self.toast_queue.back().or(self.toast.as_ref());
+        if action.is_none() && previous.is_some_and(|toast| toast.action.is_none() && toast.text == text && toast.tone == tone) { return; }
         self.toast_serial += 1;
         let serial = self.toast_serial;
         let secs = if action.is_some() { 20 } else { 5 };
-        self.toast = Some(Toast {
-            text,
-            serial,
-            action,
-        });
+        self.toast_queue.push_back(Toast { text, action, tone, serial });
+        if self.toast.is_none() { self.next_toast(cx); }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(secs)).await;
-            let _ = this.update(cx, |ws, cx| {
-                if ws.toast.as_ref().is_some_and(|t| t.serial == serial) {
-                    ws.toast = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+            let _ = this.update(cx, |ws, cx| ws.dismiss_toast_serial(serial, cx));
+        }).detach();
         cx.notify();
+    }
+
+    fn next_toast(&mut self, cx: &mut Context<Self>) {
+        self.toast = self.toast_queue.pop_front();
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        self.next_toast(cx);
+    }
+
+    pub(crate) fn dismiss_toast_serial(&mut self, serial: u64, cx: &mut Context<Self>) {
+        if self.toast.as_ref().is_some_and(|toast| toast.serial == serial) {
+            self.next_toast(cx);
+        } else {
+            self.toast_queue.retain(|toast| toast.serial != serial);
+            cx.notify();
+        }
     }
 
     /// A single-line field for a dialog, focused, with Enter submitting the dialog.
@@ -48,8 +121,8 @@ impl Workspace {
         cx.subscribe_in(&input, window, move |ws: &mut Self, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 on_enter(ws, window, cx);
-                cx.notify();
             }
+            cx.notify();
         })
         .detach();
         input.update(cx, |s, cx| s.focus(window, cx));
@@ -275,8 +348,8 @@ impl Workspace {
             self.load_enabled_models(cx);
             self.sync_skills(None, cx);
         }
-        if let Some(msg) = warnings.into_iter().next() {
-            self.toast(msg, cx);
+        if !warnings.is_empty() {
+            self.toast(warnings.join("\n"), cx);
         }
         self.focus_active(window, cx);
         cx.notify();

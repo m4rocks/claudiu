@@ -11,6 +11,7 @@ use crate::app::{
     Act, Modal, Workspace,
 };
 use gpui_kit::component::input::Input;
+use gpui_kit::base::FocusTrapElement;
 use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::fade_in;
@@ -94,9 +95,9 @@ impl Workspace {
                     false,
                 ),
             };
-            popover::dialog("modal-card", popover::ArrowNav::Disabled)
-                .track_focus(&self.modal_focus)
-                .w(px(440.0))
+            popover::dialog("modal-card")
+                .tab_group()
+                .w(crate::panels::scale::px(440.0).min(viewport.width - px(48.0)))
                 .p(px(22.0))
                 .flex()
                 .flex_col()
@@ -105,10 +106,11 @@ impl Workspace {
                     let key = ev.keystroke.key.as_str();
                     match (key, ws.modal.as_ref()) {
                         ("escape", _) => ws.act(Act::Dismiss, window, cx),
-                        ("enter", Some(Modal::Confirm { .. })) => ws.submit_modal(window, cx),
+                        ("enter", Some(Modal::Confirm { .. })) if ws.modal_focus.is_focused(window) => ws.submit_modal(window, cx),
                         _ => {}
                     }
                 }))
+                .child(popover::tab_boundary("modal-tab-start", &self.modal_tab_cycle.start))
                 .child(div().text_size(crate::panels::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
                 .child(body)
                 .child(
@@ -123,6 +125,9 @@ impl Workspace {
                             b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))
                         }),
                 )
+                .child(popover::tab_boundary("modal-tab-end", &self.modal_tab_cycle.end))
+                .focus_trap("workspace-modal-focus", &self.modal_focus)
+                .into_any_element()
         };
         Some(
             deferred(
@@ -146,31 +151,25 @@ impl Workspace {
     }
 
     pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = self.toast.as_ref()?;
-        let action = t.action.clone().map(|(label, act)| {
-            btn::text("toast-action", label, true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                ws.toast = None;
-                ws.act(act.clone(), window, cx);
-            })).into_any_element()
-        });
-        let dismiss = btn::icon_button("toast-dismiss", IconName::X).on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
-            ws.toast = None;
-            cx.notify();
-        }));
-        Some(
-            deferred(
-                div().absolute().bottom(px(18.0)).right(px(18.0)).child(
-                    fade_in(
-                    crate::panels::ui::toast::toast(t.text.clone(), action, dismiss),
-                        format!("toast-{}", t.serial),
-                        160,
-                        0.0,
-                    ),
-                ),
-            )
-            .with_priority(30)
-            .into_any_element(),
-        )
+        self.visible_toasts().next()?;
+        let mut stack = div().id("workspace-toasts").flex().flex_col().gap(px(8.0)).max_h(px(400.0)).overflow_y_scroll();
+        for t in self.visible_toasts() {
+            let serial = t.serial;
+            let action = t.action.clone().map(|(label, act)| {
+                btn::text(format!("toast-action-{serial}"), label, true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    ws.dismiss_toast_serial(serial, cx);
+                    ws.act(act.clone(), window, cx);
+                })).into_any_element()
+            });
+            let dismiss = btn::icon_button(format!("toast-dismiss-{serial}"), IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
+                ws.dismiss_toast_serial(serial, cx);
+            }));
+            stack = stack.child(fade_in(
+                crate::panels::ui::toast::toast(t.text.clone(), t.tone, action, dismiss),
+                format!("toast-{serial}"), 160, 0.0,
+            ));
+        }
+        Some(deferred(div().absolute().bottom(px(18.0)).right(px(18.0)).child(stack)).with_priority(30).into_any_element())
     }
 
     /// Floating popover next to a hovered sidebar session that has a pending question, allowing the user to answer
@@ -196,39 +195,15 @@ impl Workspace {
         for (i, opt) in question.options.iter().enumerate() {
             let checked = multi && question.selected.contains(&i);
             let answer_id = id.clone();
-            let row = div()
-                .id(gpui::SharedString::from(format!("sidebar-q-opt-{question_id}-{i}")))
-                .w_full()
-                .px(px(10.0))
-                .py(px(7.0))
-                .rounded(px(6.0))
-                .bg(if checked { theme().row_active } else { theme().background })
-                .border_1()
-                .border_color(if checked { theme().ring } else { theme().panel_border })
-                .hover(|s| s.bg(theme().accent))
-                .cursor_pointer()
-                .flex()
-                .items_start()
-                .gap(px(8.0))
-                .when(multi, |row| {
-                    row.child(ui::checkbox::checkbox(checked).mt(px(2.0)))
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(div().text_size(scaled(12.0)).font_weight(FontWeight::MEDIUM).text_color(theme().foreground).child(opt.name.clone()))
-                        .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(theme().muted_foreground).child(desc))),
-                )
-                .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            let row = ui::question::option(gpui::SharedString::from(format!("sidebar-q-opt-{question_id}-{i}")),
+                opt.name.clone(), opt.description.clone(), multi, checked, false, None)
+                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
                     if multi {
                         ws.toggle_session_question_option(&answer_id, question_id, i, cx);
                     } else {
                         ws.answer_session_question(&answer_id, question_id, Some(i), cx);
+                        ws.focus_active(window, cx);
                     }
                 }));
             options = options.child(row);
@@ -238,7 +213,7 @@ impl Workspace {
         let submit_id = id.clone();
         let open_id = id.clone();
         let ws_weak = cx.entity().downgrade();
-        let card = popover::content("sidebar-question-popover", popover::ArrowNav::Disabled)
+        let card = popover::content("sidebar-question-popover")
             .w(px(pop_w))
             .p(px(12.0))
             .bg(theme().card)
@@ -286,9 +261,10 @@ impl Workspace {
                     .border_t_1()
                     .border_color(theme().border)
                     .child(
-                        btn::text("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                        btn::text("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             ws.answer_session_question(&decline_id, question_id, None, cx);
+                            ws.focus_active(window, cx);
                         })),
                     )
                     .child(
@@ -297,31 +273,12 @@ impl Workspace {
                             .items_center()
                             .gap(px(6.0))
                             .when(multi, |d| {
-                                let label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
-                                let btn = if selected_count > 0 {
-                                    btn::colored(
-                                        "sidebar-q-submit",
-                                        Some(IconName::Check),
-                                        &label,
-                                        theme().primary,
-                                        theme().background,
-                                        theme().primary_hover,
-                                        None,
-                                        true,
-                                    )
-                                    .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                                let btn = ui::question::submit("sidebar-q-submit", selected_count)
+                                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                                         cx.stop_propagation();
                                         ws.submit_session_question(&submit_id, question_id, cx);
-                                    }))
-                                    .h(px(24.0))
-                                    .px(px(8.0))
-                                    .into_any_element()
-                                } else {
-                                    btn::disabled_leading("sidebar-q-submit", Some(IconName::Check), &label)
-                                        .h(px(24.0))
-                                        .px(px(8.0))
-                                        .into_any_element()
-                                };
+                                        ws.focus_active(window, cx);
+                                    }));
                                 d.child(btn)
                             })
                             .child(

@@ -6,6 +6,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, deferred, div, px,
 };
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::base::FocusTrapElement;
 
 use crate::app::{Act, Lookup, Modal, Workspace};
 use crate::harness::Harness;
@@ -52,23 +53,8 @@ pub fn switch_row(
     on: bool,
     flip: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
-) -> gpui::Stateful<Div> {
-    div()
-        .id(id)
-        .min_h(px(36.0))
-        .px(px(12.0))
-        .py(px(6.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .rounded(px(7.0))
-        .bg(theme().card)
-        .border_1()
-        .border_color(theme().panel_border)
-        .text_size(crate::panels::scale::px(13.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().accent))
+) -> gpui_kit::base::Button {
+    crate::panels::ui::switch::row(id)
         .child(
             div()
                 .flex()
@@ -254,8 +240,8 @@ impl Workspace {
                     ws.open_harness_dialog(harness, window, cx);
                     cx.notify();
                 }));
-            let toggle = div()
-                .id(SharedString::from(format!("settings-harness-{key}")))
+            let toggle = btn::focusable(SharedString::from(format!("settings-harness-{key}")))
+                .accessibility_label(format!("{} {}", if enabled { "Disable" } else { "Enable" }, harness.name()))
                 .pl(px(12.0))
                 .flex()
                 .items_center()
@@ -409,7 +395,7 @@ impl Workspace {
                 for found in costly {
                     col = col.child(warn(format!("{} is set in {}. {}", found.name, found.source, found.effect)));
                 }
-                col.child(div().flex().flex_col().mt(px(4.0)).gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(Input::new(claude)))
+                col.child(div().flex().flex_col().mt(px(4.0)).gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(executable_field(claude, self)))
                     .child(div().mt(px(4.0)).child(section_label("SKILLS TO TURN OFF IN CLAUDE CODE")))
                     .child(faint("Comma-separated skill names to hide from Claude Code. Entries in settings.json take precedence."))
                     .child(Input::new(skills_field))
@@ -447,20 +433,14 @@ impl Workspace {
             }
         };
 
-        let card = div()
-            .id("agent-dialog")
-            .occlude()
+        let card = crate::panels::ui::popover::dialog("agent-dialog")
+            .tab_group()
             .w(scaled(680.0).min(viewport.width - px(48.0)))
             .h(scaled(620.0).min(viewport.height - px(48.0)))
             .p(px(22.0))
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .rounded(px(12.0))
-            .bg(theme().background)
-            .border_1()
-            .border_color(theme().panel_border)
-            .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
@@ -469,11 +449,13 @@ impl Workspace {
                     cx.notify();
                 }
             }))
+            .child(crate::panels::ui::popover::tab_boundary("harness-tab-start", &self.harness_tab_cycle.start))
             .child(self.harness_dialog_scroll.wire(div().id("agent-dialog-body").flex_1().min_h_0(), window).flex().flex_col().gap(px(12.0)).child(body))
             .child(div().flex().justify_end().child(btn::text("agent-dialog-done", "Done", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                 ws.close_harness_dialog(window, cx);
                 cx.notify();
-            }))));
+            }))))
+            .child(crate::panels::ui::popover::tab_boundary("harness-tab-end", &self.harness_tab_cycle.end));
         Some(
             deferred(
                 div()
@@ -491,7 +473,8 @@ impl Workspace {
                         ws.close_harness_dialog(window, cx);
                         cx.notify();
                     }))
-                    .child(card),
+                    .child(card)
+                    .focus_trap("harness-dialog-focus", &picking.focus),
             )
             .with_priority(30)
             .into_any_element(),
@@ -567,6 +550,13 @@ impl Workspace {
             .child(settings_group("PROJECTS", Some(add), rows))
             .child(faint("Removing a project keeps its sessions; they show under no project."))
     }
+}
+
+/// Executable fields share Setup's validation and show every invalid value beside its input.
+pub fn executable_field(input: &gpui::Entity<InputState>, ws: &Workspace) -> Div {
+    let error = ws.executable_errors.get(&input.entity_id()).cloned();
+    div().flex().flex_col().gap(px(4.0)).child(Input::new(input).h(px(28.0)).text_size(crate::panels::scale::px(12.0)))
+        .children(error.map(|message| div().text_size(crate::panels::scale::px(11.0)).text_color(theme().destructive).child(message)))
 }
 
 #[cfg(test)]

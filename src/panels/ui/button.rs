@@ -44,7 +44,7 @@ pub fn button(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl 
         Variant::Default => base.bg(theme().primary).text_color(theme().primary_foreground).hover(|s| s.opacity(0.9)),
         Variant::Secondary => base.bg(theme().secondary).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
         Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
-        Variant::Ghost => base.text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Ghost => base.text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground)),
         Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground).hover(|s| s.bg(theme().destructive.opacity(0.75))),
     };
     styled.children(glyph.map(|g| icon(g, glyph_size))).when(!label.is_empty(), |b| b.child(label))
@@ -75,7 +75,7 @@ fn foundation(id: impl Into<SharedString>, size: Size) -> Button {
 /// The bare focusable button under every kit button: Tab reaches it, Enter or Space presses it, and the keyboard's
 /// focus shows as a ring.
 pub fn focusable(id: impl Into<gpui::ElementId>) -> Button {
-    Button::new(id).border_1().border_color(gpui::transparent_black()).focus_visible(|s| s.border_color(theme().primary))
+    Button::new(id).border_1().border_color(gpui::transparent_black()).focus_visible(|s| s.border_color(theme().ring)).styles(|s| s.disabled(|s| s.opacity(0.5).cursor_default()))
 }
 
 /// The app's usual text button: [`Variant::Default`] when `primary`, else [`Variant::Secondary`].
@@ -105,24 +105,13 @@ pub fn destructive(id: impl Into<SharedString>, label: impl Into<SharedString>) 
 
 /// An icon alone on a ghost button, muted until the pointer is on it.
 pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Button {
-    focusable(id.into())
-        .size(px(22.0))
-        .rounded(px(5.0))
+    button(id, Some(glyph), "", Variant::Ghost, Size::Icon)
         .text_color(theme().muted_foreground)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
-        .child(icon(glyph, 14.0))
 }
 
 /// [`icon_button`] dimmed, with no hover; attach no click handler.
 pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> Button {
-    Button::new(id.into())
-        .disabled(true)
-        .size(px(22.0))
-        .rounded(px(5.0))
-        .text_color(theme().subtle_foreground)
-        .cursor_default()
-        .child(icon(glyph, 14.0))
+    icon_button(id, glyph).disabled(true)
 }
 
 /// A button in colors of its own, for the few that carry a state's color (Send, Stop, Jump to latest).

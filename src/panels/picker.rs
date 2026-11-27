@@ -29,7 +29,6 @@ pub fn dropdown_overlay<V: 'static>(
     priority: usize,
     body: AnyElement,
     choices: Option<Choices<V>>,
-    arrow_nav: popover::ArrowNav,
     on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
     window: &Window,
     cx: &mut Context<V>,
@@ -95,7 +94,7 @@ pub fn dropdown_overlay<V: 'static>(
         );
 
     let hit = at.hit;
-    let card = popover::content(id, arrow_nav)
+    let card = popover::content(id)
         .w(px(WIDTH).max(at.min_w))
         .when_some(max_card_h, |d, h| d.max_h(h).overflow_hidden())
         .p(px(11.0))
@@ -113,8 +112,7 @@ pub fn dropdown_overlay<V: 'static>(
             }
             cx.notify();
         }));
-    let nav_choices = if arrow_nav.is_enabled() { choices } else { None };
-    let card = keyboard(card, nav_choices, move |v, window, cx| close_key(v, window, cx), cx)
+    let card = keyboard(card, choices, move |v, window, cx| close_key(v, window, cx), cx)
         .child(header)
         .child(body);
 

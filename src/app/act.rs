@@ -346,8 +346,9 @@ impl Workspace {
                 let text_generation_model = s.text_generation_model.clone();
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
-                let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
-                let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
+                self.executable_errors.clear();
+                let claude = self.executable_input(&claude_t, &claude_hint, window, cx);
+                let shell = self.executable_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let skills_field = self.modal_input(&self.store.data.settings.limits.text(), "none, e.g. dataviz, claude-api", window, cx);
                 let skill_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter installed skills"));
                 cx.subscribe(&skill_filter, |_, _, ev: &InputEvent, cx| {

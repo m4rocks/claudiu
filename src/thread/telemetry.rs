@@ -15,9 +15,11 @@ pub(crate) fn exhausted_usage(usage: &UsageLimits, now: i64) -> Option<String> {
 impl ThreadView {
     pub(super) fn render_usage_notice(&self, label: String, cx: &mut Context<Self>) -> Div {
         let mut row = notice(label, Tone::Warning);
-        if let Some(target) = self.fallback_model.clone() {
+        if let Some(target) = self.fallback_model.clone()
+            && self.thread.active_notice(crate::harness::thread::NoticeKind::Handoff).is_none() {
             row = row.child(btn::text("usage-limit-handoff", format!("Continue in {}", target.name), true)
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    if v.thread.active_notice(crate::harness::thread::NoticeKind::Handoff).is_some() { return; }
                     cx.emit(ThreadEvent::Handoff {
                         to: target.harness, model: (!target.id.is_empty()).then_some(target.id.clone()),
                         message: String::new(), effort: None, by_agent: false,

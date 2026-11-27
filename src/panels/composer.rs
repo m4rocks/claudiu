@@ -51,8 +51,6 @@ pub fn review_button(id: impl Into<SharedString>, enabled: bool) -> Button {
         .font_weight(FontWeight::MEDIUM)
     } else {
         btn::disabled_leading(id, Some(IconName::FileDiff), "Review changes")
-            .bg(theme().background)
-            .opacity(0.42)
     };
     button.h(px(26.0)).px(px(12.0))
 }

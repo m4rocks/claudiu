@@ -42,7 +42,7 @@ pub fn line_list() -> Div {
 
 /// One tab in a [`line_list`], underlined when `active`.
 pub fn line_trigger(id: impl Into<SharedString>, label: impl Into<SharedString>, active: bool) -> Button {
-    Button::new(id.into())
+    focusable(id.into())
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -56,7 +56,7 @@ pub fn line_trigger(id: impl Into<SharedString>, label: impl Into<SharedString>,
         .text_color(if active { theme().foreground } else { theme().muted_foreground })
         .cursor_pointer()
         .hover(|s| s.text_color(theme().foreground))
-        .focus_visible(|s| s.bg(theme().secondary_hover))
+        .focus_visible(|s| s.border_color(theme().ring))
         .child(label.into())
 }
 

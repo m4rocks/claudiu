@@ -200,7 +200,7 @@ impl Workspace {
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
         let mut system_notices: Vec<(String, String)> = vec![];
-        let mut toast_notice = None;
+        let mut toast_notices = Vec::new();
         let now_instant = std::time::Instant::now();
         for l in &self.live {
             let Some(rec) = self.store.session(&l.id) else { continue };
@@ -248,7 +248,7 @@ impl Workspace {
                         AttentionEvent::Finished => format!("“{title}” finished."),
                         AttentionEvent::Waiting => format!("“{title}” needs your answer."),
                     };
-                    toast_notice = Some(text);
+                    toast_notices.push(text);
                 } else {
                     system_notices.push((title, body));
                 }
@@ -272,7 +272,7 @@ impl Workspace {
         for (title, body) in system_notices {
             platform::notify(title, body);
         }
-        if let Some(text) = toast_notice {
+        for text in toast_notices {
             self.toast(text, cx);
         }
         self.sync_claude_names();

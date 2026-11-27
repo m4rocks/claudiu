@@ -632,7 +632,7 @@ fn floating(
         .flex()
         .justify_center()
         .child(
-            popover::content(id, crate::panels::ui::popover::ArrowNav::Enabled)
+            popover::content(id)
                 .w(px(560.0))
                 .max_w_full()
                 .p(px(6.0))

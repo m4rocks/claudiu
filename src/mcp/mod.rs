@@ -127,16 +127,17 @@ pub fn is_own_tool(title: &str) -> bool {
     })
 }
 
-const BRIDGE_INSTRUCTIONS: &str = " m4code also has tools that reach your other sessions: list_code_sessions, read_code_session, \
-search_sessions, search_projects and start_code_session. They act at once, without asking the user, so use them only when the \
-user asks you to look at, hand work to, start or continue in another session, or to work in a project; search_sessions may also be \
-used unasked to find a session to link. Never ask the user to confirm what they just asked for. start_code_session takes a project, \
-a model and an effort; name a model or effort only when the user did. \
+const BRIDGE_INSTRUCTIONS: &str = " Sessions are user-owned conversations. Only create a session when the user wants a new session. \
+m4code has tools that reach the user's sessions: list_code_sessions, read_code_session, search_sessions, search_projects and start_code_session. \
+Use the read tools when the user asks you to inspect existing sessions or projects; search_sessions may also be used unasked to find a session to link. \
+start_code_session creates a conversation for the user, not a worker for the model. It takes a project, a model and an effort; \
+name a model or effort only when the user did. Never ask the user to confirm a session they already requested. \
 switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
 end your turn after it.";
 
-const SUBAGENT_INSTRUCTIONS: &str = " Subagents run through m4code on enabled adapters. \
-Use spawn_subagent to delegate a task to another harness, list_subagents to inspect children, \
+const SUBAGENT_INSTRUCTIONS: &str = " Subagents are model-owned workers for delegated work within the current session. \
+Use subagents when you need another agent to help with your task; their reports return here. Sessions are for the user, subagents are for the model. \
+Subagents run through m4code on enabled adapters. Use spawn_subagent to delegate a task, list_subagents to inspect children, \
 send_subagent_message for a follow-up and stop_subagent to cancel. spawn_subagent returns at once; when a child's turn \
 ends, m4code sends you its report as a message starting with [m4code subagent report], so don't poll. Call \
 wait_subagent only when you must have the report before you can go on in this turn. \
@@ -475,7 +476,7 @@ fn subagent_tools(targets: &[String]) -> Vec<Value> {
     let id = json!({"type": "string", "description": "The subagent id returned by spawn_subagent"});
     let prompt = json!({"type": "string", "description": "The task or follow-up, at most 20,000 characters"});
     vec![
-        tool("spawn_subagent", "Start a background subagent in this session's working folder. Returns at once; its report arrives as a message in this chat when its turn ends. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids.", json!({"harness": {"type": "string", "enum": targets}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
+        tool("spawn_subagent", "Start a model-owned worker for delegated work within the current session. Its report returns to this chat. Sessions are user-owned conversations; use a subagent when you need another agent to help with your task. Returns at once. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids.", json!({"harness": {"type": "string", "enum": targets}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
         tool("list_subagents", "List this session's children, their states and latest reports.", json!({}), json!([])),
         tool("send_subagent_message", "Queue a follow-up in the same child session, resuming it if stopped. Messages during a turn run after that turn. Its report arrives as a message when it is done.", json!({"id": id, "prompt": prompt}), json!(["id", "prompt"])),
         tool("wait_subagent", "Block this turn until a child's turn finishes and return its latest report; a report the wait returns does not also arrive as a message. Only needed when you can't go on without it. Returns early for a user question. A timeout returns its current state without stopping it.", json!({"id": id, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 240}}), json!(["id"])),
@@ -511,7 +512,7 @@ fn bridge_tools() -> Vec<Value> {
             format!("Search the user's projects (name, folder, git branch) by words. Pass a project's name as the folder of start_code_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
         ),
-        tool("start_code_session", format!("Open a new coding-agent session in a project, optionally with a first prompt, a model (its harness follows) and an effort. Its permission mode is the user's default for new sessions.{CONFIRM}"), target),
+        tool("start_code_session", "Create a user-owned conversation in a project. Only create a session when the user wants a new session. Use a subagent for the model's delegated work. Optionally accepts a first prompt, model (its harness follows) and effort. Uses the user's default permission mode for new sessions.".into(), target),
         tool(
             "switch_worktree",
             "Move this session into another git worktree of its project: `main` for the main checkout, the name of a worktree the project has, or a new name to make one. m4code restarts this session in that folder once your turn ends and the conversation continues there, so end your turn after the call without more tool calls.".to_string(),
@@ -916,6 +917,20 @@ mod tests {
         );
         let names = r[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         (names, r[0]["result"]["instructions"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn session_and_subagent_instructions_distinguish_their_owners() {
+        let (_, instructions) = offer(&[]);
+        assert!(instructions.contains("Sessions are user-owned conversations."));
+        assert!(instructions.contains("Only create a session when the user wants a new session."));
+        assert!(instructions.contains("Subagents are model-owned workers for delegated work within the current session."));
+        let tools = bridge_tools();
+        let session = tools.iter().find(|tool| tool["name"] == "start_code_session").unwrap();
+        assert!(session["description"].as_str().unwrap().contains("Only create a session when the user wants a new session."));
+        let tools = subagent_tools(&["claude".into()]);
+        let subagent = tools.iter().find(|tool| tool["name"] == "spawn_subagent").unwrap();
+        assert!(subagent["description"].as_str().unwrap().contains("model-owned worker"));
     }
 
     #[test]

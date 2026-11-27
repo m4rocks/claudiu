@@ -319,3 +319,175 @@ fn command_palette_lists_only_active_sessions() {
         assert!(!session_titles.contains(&"Closed Session"), "closed sessions must not appear in Command-K: {session_titles:?}");
     });
 }
+
+#[test]
+#[ignore = "drives the workspace"]
+fn settings_tab_reaches_model_button_and_keyboard_opens_it() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| ws.act(Act::OpenSettings, window, cx));
+        window.draw(app).clear(app);
+    }).unwrap();
+    let mut visual = VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("tab");
+    let trigger_focus = visual.update(|window, app| window.focused(app).unwrap());
+    let keystroke = gpui::Keystroke::parse("enter").unwrap();
+    visual.simulate_event(gpui::KeyDownEvent { keystroke: keystroke.clone(), is_held: false, prefer_character_input: false });
+    visual.simulate_event(gpui::KeyUpEvent { keystroke });
+    assert!(ws.read_with(&visual, |ws, _| matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { target: crate::app::SettingsModelTarget::Default, .. }))),
+        "Tab must reach the model button instead of skipping it for the Shell field");
+    visual.simulate_keystrokes("escape");
+    visual.update(|window, _| assert!(trigger_focus.is_focused(window), "Closing the picker must restore its trigger's focus"));
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn settings_tab_wraps_without_focusing_the_workspace_behind_it() {
+    struct CrowdedWorkspace(Entity<Workspace>);
+    impl gpui::Render for CrowdedWorkspace {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            use gpui::{ParentElement, Styled};
+            gpui::div().size_full()
+                .children((0..150).map(|i| crate::panels::ui::button::text(format!("outside-stop-{i}"), "Outside", false).absolute().size(gpui::px(1.0)).opacity(0.0)))
+                .child(self.0.clone())
+        }
+    }
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| { gpui_kit::init(app); crate::panels::theme::install(app); });
+    let (window, host) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| {
+        let ws = app.new(|cx| Workspace::new(window, vec![], cx));
+        app.new(|_| CrowdedWorkspace(ws))
+    })).unwrap();
+    let ws = host.read_with(&cx, |host, _| host.0.clone());
+    cx.update_window(window, |_, window, app| {
+        window.activate_window();
+        ws.update(app, |ws, cx| ws.act(Act::OpenSettings, window, cx));
+        window.draw(app).clear(app);
+    }).unwrap();
+    let mut visual = VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("shift-tab");
+    visual.update(|window, app| {
+        assert!(ws.read(app).modal_focus.contains_focused(window, app), "Shift+Tab must stay in Settings");
+    });
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn a_focused_confirmation_accepts_enter_without_first_tabbing_to_a_button() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.modal = Some(Modal::Confirm { title: "Confirm".into(), body: "Continue?".into(), confirm: "Continue".into(), danger: false, act: Act::Dismiss });
+            window.focus(&ws.modal_focus, cx);
+        });
+        window.draw(app).clear(app);
+    }).unwrap();
+    let mut visual = VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("enter");
+    assert!(ws.read_with(&visual, |ws, _| ws.modal.is_none()), "Enter must submit the focused confirmation");
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn toasts_preserve_actions_and_error_severity_in_delivery_order() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, _, app| ws.update(app, |ws, cx| {
+        ws.show_toast("Removed project".into(), Some(("Undo".into(), Act::Dismiss)), cx);
+        ws.toast("Copied", cx);
+        ws.error_toast("Could not load GitHub".into(), cx);
+        assert_eq!(ws.toast.as_ref().unwrap().text, "Removed project");
+        assert!(ws.toast.as_ref().unwrap().action.is_some());
+        ws.dismiss_toast(cx);
+        assert_eq!(ws.toast.as_ref().unwrap().text, "Copied");
+        ws.dismiss_toast(cx);
+        assert_eq!(ws.toast.as_ref().unwrap().text, "Could not load GitHub");
+        assert_eq!(ws.toast.as_ref().unwrap().tone, crate::panels::ui::alert::Tone::Destructive);
+        ws.dismiss_toast(cx);
+        assert!(ws.toast.is_none());
+    })).unwrap();
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn settings_reports_both_invalid_executable_paths() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        ws.act(Act::OpenSettings, window, cx);
+        if let Some(Modal::Settings { shell, claude, .. }) = &ws.modal {
+            shell.update(cx, |input, cx| input.set_value("m4code-nonexistent-shell-768491", window, cx));
+            claude.update(cx, |input, cx| input.set_value("m4code-nonexistent-claude-768491", window, cx));
+        }
+        ws.close_settings(window, cx);
+        let message = &ws.toast.as_ref().expect("validation feedback").text;
+        assert!(message.contains("Shell:"));
+        assert!(message.contains("Claude path:"));
+    })).unwrap();
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn enter_on_cancel_does_not_run_the_confirmation_action() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.modal = Some(Modal::Confirm { title: "Confirm".into(), body: "Continue?".into(), confirm: "Continue".into(), danger: true, act: Act::OpenSettings });
+            window.focus(&ws.modal_focus, cx);
+        });
+        window.draw(app).clear(app);
+    }).unwrap();
+    let mut visual = VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("tab");
+    let keystroke = gpui::Keystroke::parse("enter").unwrap();
+    visual.simulate_event(gpui::KeyDownEvent { keystroke: keystroke.clone(), is_held: false, prefer_character_input: false });
+    visual.simulate_event(gpui::KeyUpEvent { keystroke });
+    assert!(ws.read_with(&visual, |ws, _| ws.modal.is_none()), "Cancel must dismiss rather than execute the action that opens Settings");
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn category_enter_does_not_accept_an_inline_worktree_removal() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.act(Act::OpenSettings, window, cx);
+            ws.worktrees_page.asking = Some(crate::app::worktrees::Asked { folder: PathBuf::from("unused"), body: "Delete?".into(), confirm: "Delete".into(), danger: true, act: Act::CopyText("unexpected removal".into()), cancel_focus: cx.focus_handle(), focus_pending: std::cell::Cell::new(false) });
+        });
+        window.draw(app).clear(app);
+    }).unwrap();
+    let mut visual = VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("enter");
+    assert!(ws.read_with(&visual, |ws, _| ws.visible_toasts().all(|toast| toast.text != "Copied")), "Category Enter must not execute the pending removal action");
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn repeated_toasts_merge_and_each_visible_toast_dismisses_independently() {
+    let _data = crate::datadir::own_folder();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, _, app| ws.update(app, |ws, cx| {
+        ws.show_toast("Removed".into(), Some(("Undo".into(), Act::Dismiss)), cx);
+        ws.toast("Copied", cx);
+        ws.toast("Copied", cx);
+        assert_eq!(ws.visible_toasts().count(), 2);
+        let serial = ws.visible_toasts().find(|toast| toast.text == "Copied").unwrap().serial;
+        ws.dismiss_toast_serial(serial, cx);
+        assert_eq!(ws.visible_toasts().count(), 1);
+        assert_eq!(ws.toast.as_ref().unwrap().text, "Removed");
+        ws.dismiss_toast_serial(serial, cx);
+        assert_eq!(ws.visible_toasts().count(), 1, "an expired timer must not dismiss another toast");
+    })).unwrap();
+}

@@ -150,7 +150,7 @@ fn capture() -> Result<()> {
             ensure!(std::time::Instant::now() < until, "offline screenshot session did not open");
             std::thread::yield_now();
         }
-        cx.update_window(window, |_, _, app| workspace.update(app, |ws, cx| {
+        cx.update_window(window, |_, window, app| workspace.update(app, |ws, cx| {
             if let Some(view) = ws.active_id().and_then(|id| ws.live_view(id)).and_then(|v| v.thread()).cloned() {
                 view.update(cx, |v, cx| v.screenshot_activity(scenario != "session-no-compact", scenario == "session-scrolled", cx));
                 if matches!(scenario.as_str(), "session-quotes" | "session-quotes-menu") {
@@ -176,7 +176,13 @@ fn capture() -> Result<()> {
                     view.update(cx, |v, cx| v.screenshot_review(cx));
                 }
             }
-            if scenario == "toast" { ws.toast("Workspace settings saved", cx); }
+            if scenario == "toast" {
+                if let Some(project) = ws.store.data.projects.first().map(|project| project.id.clone()) {
+                    ws.act(crate::app::Act::RemoveProject(project), window, cx);
+                }
+                ws.toast("Workspace settings saved", cx);
+                ws.error_toast("Could not load GitHub: example error".into(), cx);
+            }
         }))?;
         cx.run_until_parked();
     }
