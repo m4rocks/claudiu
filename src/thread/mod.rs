@@ -3924,7 +3924,7 @@ impl ThreadView {
     }
 
     /// The ACP fixture is connected; stage a busy conversation without invoking a model.
-    pub(crate) fn screenshot_activity(&mut self, compact: bool, scrolled: bool, cx: &mut Context<Self>) {
+    pub(crate) fn screenshot_activity(&mut self, compact: bool, scrolled: bool, done: bool, cx: &mut Context<Self>) {
         assert!(self.phase == Phase::Ready, "the offline ACP fixture must be connected");
         self.thread.context = Some((124_000, 200_000));
         self.compaction.enabled = compact;
@@ -3947,7 +3947,9 @@ impl ThreadView {
             self.list.set_follow_mode(gpui::FollowMode::Normal);
             self.list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: gpui::px(0.0) });
         }
-        self.working = true;
+        self.working = !done;
+        self.turn_started = (!done).then(|| Instant::now() - Duration::from_secs(42));
+        self.last_turn = done.then_some(Duration::from_secs(75));
         cx.notify();
     }
 }

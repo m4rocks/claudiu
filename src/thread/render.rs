@@ -584,11 +584,11 @@ impl ThreadView {
             ("Working…".to_string(), true)
         } else {
             let Some(took) = self.last_turn else { return div().into_any_element() };
-            return self.wrap_turn_status(elements::turn_done_line(took));
+            return self.wrap_turn_status(ui::turn_status::done(elements::format_duration(took)));
         };
         let stop = stoppable.then(|| div().flex().gap(px(4.0)).items_center().child(kbd("Esc"))
             .child(div().text_size(scale::px(11.5)).text_color(theme().subtle_foreground).child("to stop")).into_any_element());
-        self.wrap_turn_status(elements::turn_working_line(label, elapsed, stop))
+        self.wrap_turn_status(ui::turn_status::working(label, elapsed.map(elements::format_duration), stop))
     }
 
     fn wrap_turn_status(&self, line: AnyElement) -> AnyElement {

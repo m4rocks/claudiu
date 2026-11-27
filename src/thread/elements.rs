@@ -130,22 +130,6 @@ pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The turn's working row under the last step: spinner in the steps' icon column, label, timer and stop hint.
-pub fn turn_working_line(label: String, elapsed: Option<Duration>, stop: Option<AnyElement>) -> AnyElement {
-    crate::panels::ui::notice::notice(label, crate::panels::ui::alert::Tone::Default)
-        .children(elapsed.map(|d| div().text_color(theme().subtle_foreground).child(format_duration(d))))
-        .children(stop)
-        .debug_selector(|| "turn-working".into())
-        .into_any_element()
-}
-
-/// What stays under a finished turn: how long it took.
-pub fn turn_done_line(took: Duration) -> AnyElement {
-    crate::panels::ui::notice::notice(format!("Worked for {}", format_duration(took)), crate::panels::ui::alert::Tone::Default)
-        .debug_selector(|| "turn-done".into())
-        .into_any_element()
-}
-
 /// Base `TraceCollapsibleContent` primitive: indented content block with the vertical rail aligned under `trace_line`'s icon.
 pub fn trace_content(child: AnyElement) -> AnyElement {
     div()
