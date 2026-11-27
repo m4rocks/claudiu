@@ -6,6 +6,8 @@ mod mouse;
 mod paths;
 mod typing;
 
+pub use typing::{SHELL_RECENT_LINES, format_shell_quote_block};
+
 use element::TerminalElement;
 
 use std::ops::Range;

@@ -105,6 +105,25 @@ impl Workspace {
         }
     }
 
+    /// Grab the shell's current selection—or recent output when nothing is selected—and insert it
+    /// into the active session's chat composer as a Markdown fenced quote block, then focus the composer.
+    pub fn send_shell_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.active_id().and_then(|id| self.live_view(id)).and_then(|v| v.thread()).cloned() else {
+            self.toast("Open a chat session to send shell output.", cx);
+            return;
+        };
+        let Some(shell) = self.shells.get(&self.shell_owner()).filter(|p| p.open).map(|p| p.view.clone()) else {
+            return;
+        };
+        let Some(output) = shell.read(cx).selection_or_recent_output(crate::terminal::view::SHELL_RECENT_LINES) else {
+            self.toast("No shell output to send.", cx);
+            return;
+        };
+        let block = crate::terminal::view::format_shell_quote_block(&output);
+        thread.update(cx, |view, cx| view.insert_quote_block(&block, window, cx));
+        cx.notify();
+    }
+
     /// The divider above the shell panel is being dragged: follow the pointer, keeping room for the terminal.
     pub fn drag_shell(&mut self, y: f32, window_h: f32) {
         let Some(d) = self.shell_drag.as_ref() else { return };

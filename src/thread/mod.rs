@@ -8,7 +8,7 @@ mod keys;
 mod queue;
 mod render;
 mod review;
-pub(crate) use review::clear_turn_reviews;
+pub(crate) use review::{REVIEW_DIFF_MAX_CHARS, build_review_prompt, clear_turn_reviews};
 mod timeline;
 mod find;
 mod telemetry;
@@ -163,6 +163,8 @@ pub enum ThreadEvent {
     CancelCompaction,
     /// The underlying harness session moved into `folder` in place without recreating the `ThreadView`.
     WorktreeSwitched { folder: PathBuf, session_id: String },
+    /// Launch a read-only cross-model review subagent for the current diff patch.
+    ReviewDiff { model: CatalogModel, patch: String },
     /// Switching the underlying harness session to `folder` failed; the original harness session is still active.
     WorktreeSwitchFailed { folder: PathBuf, error: String },
 }
@@ -3192,7 +3194,7 @@ impl ThreadView {
 
     /// Close the model or permission dropdown and give the keyboard back to the message box, which the model
     /// search box took when the dropdown opened.
-    pub(super) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
 
@@ -3761,6 +3763,14 @@ impl ThreadView {
         self.set_draft(&with, window, cx);
     }
 
+    /// Append a quoted block (e.g. shell selection or recent output) to the composer and focus it.
+    pub fn insert_quote_block(&mut self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let next = append_quote_block(&self.draft(cx), block);
+        self.set_draft(&next, window, cx);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
     /// What the composer holds.
     pub fn draft(&self, cx: &App) -> String {
         self.composer.read(cx).value().to_string()
@@ -3902,6 +3912,15 @@ pub(crate) fn has_saved_queue(record_id: &str) -> bool {
 pub(crate) fn with_comment(typed: &str, comment: &str) -> String {
     let typed = typed.trim_end();
     if typed.is_empty() { comment.to_string() } else { format!("{typed}\n{comment}") }
+}
+
+pub(crate) fn append_quote_block(typed: &str, block: &str) -> String {
+    let typed = typed.trim_end();
+    if typed.is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{typed}\n\n{block}\n")
+    }
 }
 
 fn str_of(value: &Value, key: &str) -> String {

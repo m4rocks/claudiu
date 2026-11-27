@@ -315,6 +315,64 @@ impl Workspace {
                 }),
             )
             .child(div().w(px(28.0)).h(px(2.0)).rounded_full().bg(theme().resize_handle).group_hover("shell-resize", |s| s.bg(theme().resize_handle_hover)));
+        let has_chat = self.active_id().and_then(|active| self.live_view(active)).and_then(|v| v.thread()).is_some();
+        let shell_title = view
+            .read(cx)
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("Shell · {t}"))
+            .unwrap_or_else(|| "Shell".to_string());
+        let send_btn = if has_chat {
+            icon_button("shell-send-to-chat", IconName::MessageSquare)
+                .tooltip(crate::panels::ui::tooltip::tooltip("Send selection or recent output to chat"))
+                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.send_shell_to_chat(window, cx)))
+        } else {
+            icon_button_disabled("shell-send-to-chat", IconName::MessageSquare)
+                .tooltip(crate::panels::ui::tooltip::tooltip("Open a chat session to send shell output"))
+        };
+        let header = div()
+            .flex_none()
+            .h(px(28.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(theme().panel_border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_w_0()
+                    .text_size(crate::panels::scale::px(11.5))
+                    .text_color(theme().muted_foreground)
+                    .child(crate::panels::widgets::icon(IconName::Terminal, 12.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(shell_title),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(send_btn)
+                    .child(
+                        icon_button("shell-close", IconName::X)
+                            .tooltip(crate::panels::ui::tooltip::tooltip("Hide shell"))
+                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_shell_here(window, cx))),
+                    ),
+            );
         Some(
             div()
                 .flex()
@@ -333,13 +391,15 @@ impl Workspace {
                         .child(
                             div()
                                 .size_full()
+                                .flex()
+                                .flex_col()
                                 .rounded(px(theme::PANEL_RADIUS))
                                 .overflow_hidden()
                                 .border_1()
                                 .border_color(theme().panel_border)
                                 .bg(theme().background)
-                                .p(px(6.0))
-                                .child(view),
+                                .child(header)
+                                .child(div().flex_1().min_h_0().p(px(6.0)).child(view)),
                         )
                         .child(handle),
                 )

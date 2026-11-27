@@ -268,6 +268,77 @@ impl Workspace {
             _ => Err("Unknown subagent operation.".into()),
         }
     }
+
+    /// Launch a read-only cross-model code review subagent for `patch` under `parent_id`, so its findings
+    /// fold back into the parent chat and show in the right sidebar.
+    pub(super) fn spawn_review_subagent(
+        &mut self,
+        parent_id: &str,
+        model: crate::harness::CatalogModel,
+        patch: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(parent) = self.store.session(parent_id).cloned() else {
+            self.toast("The parent session no longer exists.", cx);
+            return;
+        };
+        if !self.is_running(&parent.id, cx) {
+            self.toast("The parent session is no longer running.", cx);
+            return;
+        }
+        let Some(prompt) = crate::thread::build_review_prompt(patch, crate::thread::REVIEW_DIFF_MAX_CHARS) else {
+            self.toast("There is no diff to review.", cx);
+            return;
+        };
+        if !self.store.data.settings.harness_enabled(model.harness) {
+            self.toast(format!("{} is disabled in Settings.", model.harness.name()), cx);
+            return;
+        }
+        let id = new_id();
+        let chosen_model = (!model.id.is_empty()).then(|| model.id.clone());
+        let meta = AgentMeta {
+            harness: model.harness,
+            parent_session: Some(parent.id.clone()),
+            subagent_edits: false,
+            chosen_model: chosen_model.clone(),
+            ..Default::default()
+        };
+        let Some(mut start) = self.thread_start(&id, &parent.cwd, &meta, None, Some(prompt), Starter::User, cx) else {
+            return;
+        };
+        if let Some(value) = &chosen_model {
+            start.options.retain(|(existing, _)| *existing != "model");
+            start.options.push(("model", value.clone()));
+        }
+        let title = review_subagent_title(&model);
+        let label = if model.name.is_empty() { model.harness.name().to_string() } else { model.name.clone() };
+        let record = SessionRecord {
+            id,
+            kind: SessionKind::Agent,
+            title,
+            custom_title: None,
+            auto_title: None,
+            project_id: parent.project_id,
+            cwd: parent.cwd,
+            created_at: now(),
+            last_active: now(),
+            exit_code: None,
+            hidden: false,
+            agent: Some(meta),
+        };
+        self.start_thread_with_focus(record, start, true, false, window, cx);
+        self.toast(format!("Started read-only review with {label}"), cx);
+    }
+}
+
+fn review_subagent_title(model: &crate::harness::CatalogModel) -> String {
+    let name = model.name.trim();
+    if name.is_empty() {
+        format!("{} review", model.harness.name())
+    } else {
+        format!("Review ({name})")
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +364,14 @@ mod tests {
         for state in [Starting, Running, WaitingForUser] {
             assert!(!state.finished(), "{state:?} still needs watching");
         }
+    }
+
+    #[test]
+    fn review_subagent_title_uses_model_name_or_harness_fallback() {
+        use crate::harness::{CatalogModel, Harness};
+        let named = CatalogModel { harness: Harness::Codex, id: "gpt-5".into(), name: "GPT-5".into() };
+        assert_eq!(super::review_subagent_title(&named), "Review (GPT-5)");
+        let unnamed = CatalogModel { harness: Harness::Claude, id: String::new(), name: "  ".into() };
+        assert_eq!(super::review_subagent_title(&unnamed), "Claude Code review");
     }
 }

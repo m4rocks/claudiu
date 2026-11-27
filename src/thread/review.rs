@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement, SharedString, Styled, Subscription, Window, div, list, prelude::FluentBuilder, px};
+use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, list, prelude::FluentBuilder, px};
 use gpui_kit::{assets::IconName, base::{AlertDialog, AlertDialogDescription, AlertDialogPopup, AlertDialogTitle}};
 use gpui_kit::component::input::{InputEvent, InputState};
 
@@ -15,13 +15,15 @@ use uuid::Uuid;
 
 use super::{ThreadEvent, ThreadView};
 use crate::git::snapshot::{self, FileChange, Hunk};
+use crate::harness::{CatalogModel, Harness};
 use crate::panels::comment_box::{COMMENT_GUTTER_PAD, COMMENT_SIZE, comment_box, comment_input, comment_trigger};
-use crate::panels::scale;
+use crate::panels::{logos, picker, scale};
 use crate::panels::theme::theme;
-use crate::panels::ui::button as btn;
+use crate::panels::ui::{button as btn, command};
 use crate::panels::ui::empty::empty_panel;
 use crate::panels::ui::skeleton::skeleton_rows;
 use crate::panels::ui::spinner::spinner;
+use crate::panels::widgets::{Dropdown, Trigger, icon};
 
 pub(super) struct ActiveTurn {
     pub id: Uuid,
@@ -124,6 +126,10 @@ pub struct Review {
     restoring: bool,
     /// None while the changes are read.
     files: Option<Vec<FileChange>>,
+    /// Raw unified diff patch for cross-model review.
+    patch: Option<String>,
+    /// Open "Review with…" model picker dropdown, if any.
+    model_picker: Option<Dropdown>,
     /// Hunks the user kept, by their patch, which stays the same while other hunks are put back.
     kept: HashSet<String>,
     comments: Vec<Comment>,
@@ -149,6 +155,8 @@ impl Review {
             restore_confirm: false,
             restoring: false,
             files: None,
+            patch: None,
+            model_picker: None,
             kept: HashSet::new(),
             comments: Vec::new(),
             commenting: None,
@@ -158,6 +166,24 @@ impl Review {
             list: ListState::new(0, ListAlignment::Top, px(600.0)),
             glide: Default::default(),
         }
+    }
+
+    fn diff_patch(&self) -> String {
+        if let Some(patch) = self.patch.as_deref().filter(|p| !p.trim().is_empty()) {
+            return patch.to_string();
+        }
+        let Some(files) = &self.files else { return String::new() };
+        let mut out = String::new();
+        for file in files {
+            for hunk in &file.hunks {
+                out.push_str(&hunk.patch);
+            }
+        }
+        out
+    }
+
+    fn has_diff(&self) -> bool {
+        self.files.as_ref().is_some_and(|files| !files.is_empty()) && !self.diff_patch().trim().is_empty()
     }
 
     fn rebuild_rows(&mut self) {
@@ -216,6 +242,69 @@ pub struct Comment {
     pub path: PathBuf,
     pub line: u32,
     pub text: String,
+}
+
+/// Maximum characters of unified diff embedded directly in a cross-model review prompt.
+pub(crate) const REVIEW_DIFF_MAX_CHARS: usize = 60_000;
+
+/// Order enabled models for cross-model diff review, preferring harnesses other than `current_harness` first
+/// while preserving each group's relative order.
+pub(crate) fn review_model_choices(models: &[CatalogModel], current_harness: Harness) -> Vec<CatalogModel> {
+    let mut ordered = Vec::with_capacity(models.len());
+    ordered.extend(models.iter().filter(|m| m.harness != current_harness).cloned());
+    ordered.extend(models.iter().filter(|m| m.harness == current_harness).cloned());
+    ordered
+}
+
+/// Build a focused read-only code-review prompt containing `patch`, truncating cleanly if it exceeds `max_chars`.
+pub(crate) fn build_review_prompt(patch: &str, max_chars: usize) -> Option<String> {
+    let trimmed = patch.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (body, truncated) = truncate_diff(trimmed, max_chars);
+    let fence = "`".repeat(longest_backtick_run(body).max(2) + 1);
+    let mut prompt = String::from(
+        "Perform a focused, read-only code review of the diff below.\n\
+         - Prioritize correctness bugs, logic errors, edge cases, regressions, security issues, and missing tests.\n\
+         - Reference specific file paths and line numbers for every finding.\n\
+         - Keep findings concise and actionable. If you find no issues, say so briefly.\n\
+         - Do NOT modify any files; this is a read-only review.\n\n",
+    );
+    prompt.push_str(&fence);
+    prompt.push_str("diff\n");
+    prompt.push_str(body);
+    if truncated {
+        prompt.push_str("\n... (diff truncated; inspect remaining changes in the workspace if needed)");
+    }
+    prompt.push('\n');
+    prompt.push_str(&fence);
+    Some(prompt)
+}
+
+fn truncate_diff(text: &str, max_chars: usize) -> (&str, bool) {
+    if max_chars == 0 {
+        return ("", !text.is_empty());
+    }
+    let Some((cut, _)) = text.char_indices().nth(max_chars) else {
+        return (text, false);
+    };
+    let slice = &text[..cut];
+    let clean = slice.rfind('\n').filter(|&ix| ix > 0).map_or(slice, |ix| &slice[..ix]);
+    (clean, true)
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    let (mut best, mut run) = (0usize, 0usize);
+    for ch in text.chars() {
+        if ch == '`' {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
 }
 
 /// The message that hands the comments to the agent.
@@ -304,14 +393,21 @@ impl ThreadView {
         let path = patch_path(&self.record_id, id);
         cx.spawn(async move |this, cx| {
             let read = cx.background_executor().spawn(async move {
-                std::fs::read_to_string(path).map(|patch| snapshot::parse(&patch))
+                std::fs::read_to_string(path).map(|patch| {
+                    let files = snapshot::parse(&patch);
+                    (files, patch)
+                })
             }).await;
             let _ = this.update(cx, |v, cx| {
                 let Some(review) = v.review.as_mut().filter(|review| review.id == id) else { return };
                 match read {
-                    Ok(files) => review.files = Some(files),
+                    Ok((files, patch)) => {
+                        review.files = Some(files);
+                        review.patch = Some(patch);
+                    }
                     Err(error) => {
                         review.files = Some(Vec::new());
+                        review.patch = None;
                         review.error = Some(format!("Could not open the turn review: {error}"));
                     }
                 }
@@ -363,13 +459,22 @@ impl ThreadView {
         let Some(snapshot) = review.snapshot.clone() else { return };
         let (cwd, id) = (self.cwd.clone(), review.id);
         cx.spawn(async move |this, cx| {
-            let read = cx.background_executor().spawn(async move { snapshot::changes(&cwd, &snapshot) }).await;
+            let read = cx.background_executor().spawn(async move {
+                snapshot::capture(&cwd, &snapshot).map(|patch| {
+                    let files = snapshot::parse(&patch);
+                    (files, patch)
+                })
+            }).await;
             let _ = this.update(cx, |v, cx| {
                 if let Some(review) = &mut v.review && review.id == id {
                     match read {
-                        Ok(files) => review.files = Some(files),
+                        Ok((files, patch)) => {
+                            review.files = Some(files);
+                            review.patch = Some(patch);
+                        }
                         Err(why) => {
                             review.files = Some(Vec::new());
+                            review.patch = None;
                             review.error = Some(why);
                         }
                     }
@@ -514,8 +619,126 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub(super) fn render_review(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+    fn toggle_review_model_picker(&mut self, at: Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(review) = &mut self.review else { return };
+        if !review.has_diff() || review.restoring {
+            review.model_picker = None;
+            cx.notify();
+            return;
+        }
+        if review.model_picker.is_some() {
+            review.model_picker = None;
+        } else {
+            review.model_picker = Some(at);
+            self.picker_nav.reset();
+            self.picker_nav.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_review_model_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(review) = &mut self.review {
+            review.model_picker = None;
+            cx.notify();
+        }
+    }
+
+    fn start_cross_model_review(&mut self, model: CatalogModel, cx: &mut Context<Self>) {
+        let Some(review) = &self.review else { return };
+        let patch = review.diff_patch();
+        if patch.trim().is_empty() {
+            self.close_review_model_picker(cx);
+            return;
+        }
+        self.close_review(cx);
+        cx.emit(ThreadEvent::ReviewDiff { model, patch });
+    }
+
+    fn render_review_model_picker(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let at = self.review.as_ref()?.model_picker?;
+        let models = review_model_choices(&self.unified_models(), self.harness);
+        let has_other_harness = models.iter().any(|m| m.harness != self.harness);
+        let mut choices = command::Choices::new(&self.picker_nav, "");
+        let mut list = choices
+            .list("review-model-list", window)
+            .role(gpui::Role::ListBox)
+            .aria_label("Review models")
+            .max_h(px(260.0));
+        let mut previous = None;
+        for (n, model) in models.iter().enumerate() {
+            let heading = (previous != Some(model.harness)).then(|| {
+                let badge = (model.harness == self.harness && has_other_harness).then(|| {
+                    div()
+                        .text_size(scale::px(10.5))
+                        .text_color(theme().subtle_foreground)
+                        .child("current")
+                        .into_any_element()
+                });
+                picker::section_header(model.harness.name(), badge)
+            });
+            previous = Some(model.harness);
+            let choice = model.clone();
+            let logo = logos::draw(logos::for_harness(model.harness), 11.5, theme().subtle_foreground).into_any_element();
+            let row = command::row(SharedString::from(format!("review-model-{n}")), Some(logo), model.name.clone(), None, None, false, false)
+                .role(gpui::Role::ListBoxOption)
+                .debug_selector(move || format!("review-model-{n}"));
+            let row = choices.add(
+                row,
+                move |v, _, cx| v.start_cross_model_review(choice.clone(), cx),
+                cx,
+            );
+            list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
+        }
+        if models.is_empty() {
+            list = list.child(empty_panel(IconName::Search, "No enabled models available"));
+        }
+        Some(picker::dropdown_overlay(
+            ("review-model-picker", "REVIEW WITH"),
+            at,
+            30,
+            list.into_any_element(),
+            Some(choices),
+            |v, _, cx| v.close_review_model_picker(cx),
+            window,
+            cx,
+        ))
+    }
+
+    pub(super) fn render_review(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let review = self.review.as_ref()?;
+        let file_count = review.files.as_ref().map(|files| files.len());
+        let has_diff = review.has_diff();
+        let header = div()
+            .flex_none()
+            .px(px(18.0))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme().panel_border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .min_w_0()
+                    .child(icon(IconName::FileDiff, 14.0).text_color(theme().muted_foreground))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Review changes"))
+                    .when_some(file_count.filter(|&n| n > 0), |d, n| {
+                        let label = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                        d.child(div().text_size(scale::px(12.0)).text_color(theme().muted_foreground).child(label))
+                    }),
+            )
+            .when(has_diff && !review.restoring, |d| {
+                d.child(
+                    btn::text("review-with", "Review with…", false)
+                        .debug_selector(|| "review-with".into())
+                        .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground))
+                        .dropdown_right(cx, |v, at, window, cx| v.toggle_review_model_picker(at, window, cx)),
+                )
+            });
         let body: AnyElement = match &review.files {
             None => div()
                 .flex_1()
@@ -614,7 +837,8 @@ impl ThreadView {
                                 v.cancel_restore(cx);
                             })))))
         });
-        Some(div().flex_1().flex().flex_col().min_h_0().child(body).child(footer).children(alert))
+        let model_picker = self.render_review_model_picker(window, cx);
+        Some(div().flex_1().flex().flex_col().min_h_0().child(header).child(body).child(footer).children(model_picker).children(alert))
     }
 
     fn cancel_restore(&mut self, cx: &mut Context<Self>) {
@@ -796,5 +1020,52 @@ mod tests {
     fn comments_go_back_naming_their_lines() {
         let comments = [Comment { path: "src/a.rs".into(), line: 12, text: " use a match \n".into() }, Comment { path: "b.txt".into(), line: 3, text: "typo".into() }];
         assert_eq!(comments_message(&comments), "Review comments on your changes:\n\n@src/a.rs#L12: use a match\n@b.txt#L3: typo");
+    }
+
+    #[test]
+    fn review_model_choices_prefers_different_harnesses_first() {
+        let models = vec![
+            CatalogModel { harness: Harness::Claude, id: "claude-sonnet".into(), name: "Claude Sonnet".into() },
+            CatalogModel { harness: Harness::Codex, id: "gpt-5".into(), name: "GPT-5".into() },
+            CatalogModel { harness: Harness::Claude, id: "claude-opus".into(), name: "Claude Opus".into() },
+            CatalogModel { harness: Harness::OpenCode, id: "o3".into(), name: "o3".into() },
+        ];
+        let ordered = review_model_choices(&models, Harness::Claude);
+        let ids: Vec<&str> = ordered.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-5", "o3", "claude-sonnet", "claude-opus"]);
+
+        assert!(review_model_choices(&[], Harness::Claude).is_empty());
+        let same_only = vec![models[0].clone(), models[2].clone()];
+        assert_eq!(
+            review_model_choices(&same_only, Harness::Claude).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["claude-sonnet", "claude-opus"]
+        );
+    }
+
+    #[test]
+    fn build_review_prompt_handles_empty_backticks_and_truncation() {
+        assert_eq!(build_review_prompt("   \n\t ", 1000), None);
+
+        let patch = "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old\n+```rust\n+new\n";
+        let prompt = build_review_prompt(patch, 1000).expect("non-empty diff produces prompt");
+        assert!(prompt.contains("read-only"), "prompt should specify read-only review");
+        assert!(prompt.contains("````diff\n"), "prompt should widen backtick fence when diff contains triple backticks");
+        assert!(prompt.ends_with("\n````"));
+
+        let long_patch = "line 1\nline 2\nline 3\nline 4\nline 5";
+        let truncated = build_review_prompt(long_patch, 15).expect("truncated prompt");
+        assert!(truncated.contains("line 1\nline 2"));
+        assert!(truncated.contains("diff truncated"));
+        assert!(!truncated.contains("line 5"));
+    }
+
+    #[test]
+    fn append_quote_block_separates_from_existing_draft() {
+        let block = "> ```\n> echo hi\n> ```";
+        assert_eq!(super::super::append_quote_block("", block), "> ```\n> echo hi\n> ```\n");
+        assert_eq!(
+            super::super::append_quote_block("Explain this error:  ", block),
+            "Explain this error:\n\n> ```\n> echo hi\n> ```\n"
+        );
     }
 }

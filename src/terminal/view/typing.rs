@@ -72,6 +72,23 @@ impl TerminalView {
         term.bounds_to_string(GridPoint::new(start, Column(0)), GridPoint::new(bottom, last)).trim_end().to_string()
     }
 
+    /// Returns the active terminal selection when non-empty, otherwise up to `max_lines` recent
+    /// non-empty lines from the visible screen and scrollback buffer.
+    pub fn selection_or_recent_output(&self, max_lines: usize) -> Option<String> {
+        let term = self.terminal.term.lock();
+        if let Some(selected) = term.selection_to_string() {
+            let trimmed = selected.trim_matches(|c| c == '\r' || c == '\n');
+            if !trimmed.trim().is_empty() {
+                return Some(trimmed.replace("\r\n", "\n"));
+            }
+        }
+        let (top, bottom, last) = (term.topmost_line(), term.bottommost_line(), term.last_column());
+        let window_lines = (max_lines.saturating_mul(8)).max(200) as i32;
+        let start = Line((bottom.0 - window_lines + 1).max(top.0));
+        let raw = term.bounds_to_string(GridPoint::new(start, Column(0)), GridPoint::new(bottom, last));
+        extract_recent_output(&raw, max_lines)
+    }
+
     /// Copies the selection; returns whether there was one.
     pub fn copy(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
@@ -223,8 +240,111 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+/// Default maximum number of non-empty lines grabbed when sending recent shell output to chat.
+pub const SHELL_RECENT_LINES: usize = 60;
+
+/// Extract up to `max_non_empty_lines` trailing non-empty lines from raw terminal text,
+/// preserving internal blank lines between them and trimming trailing whitespace on each line.
+pub fn extract_recent_output(raw: &str, max_non_empty_lines: usize) -> Option<String> {
+    if max_non_empty_lines == 0 {
+        return None;
+    }
+    let normalized = raw.replace("\r\n", "\n");
+    let lines: Vec<&str> = normalized.lines().map(str::trim_end).collect();
+    let non_empty: Vec<usize> = lines.iter().enumerate().filter_map(|(i, l)| (!l.is_empty()).then_some(i)).collect();
+    let &last_ix = non_empty.last()?;
+    let first_non_empty = non_empty.len().saturating_sub(max_non_empty_lines);
+    let start_ix = non_empty[first_non_empty];
+    Some(lines[start_ix..=last_ix].join("\n"))
+}
+
+/// Format shell output as a Markdown fenced quote block, picking a backtick fence longer than
+/// any backtick run in `output` so embedded fences never break out.
+pub fn format_shell_quote_block(output: &str) -> String {
+    let normalized = output.replace("\r\n", "\n");
+    let max_ticks = longest_backtick_run(&normalized);
+    let fence = "`".repeat(max_ticks.max(2) + 1);
+    let mut out = format!("> {fence}\n");
+    for line in normalized.lines() {
+        if line.is_empty() {
+            out.push_str(">\n");
+        } else {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("> ");
+    out.push_str(&fence);
+    out
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    let (mut best, mut run) = (0usize, 0usize);
+    for ch in text.chars() {
+        if ch == '`' {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
 /// A path as a shell takes it when pasted: quoted if it has spaces.
 fn quote_path(p: &std::path::Path) -> String {
     let s = p.to_string_lossy();
     if s.contains(' ') { format!("\"{s}\"") } else { s.into_owned() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_recent_output_drops_blanks_and_limits_non_empty_lines() {
+        assert_eq!(extract_recent_output("   \n\n  \r\n", 60), None);
+        assert_eq!(extract_recent_output("hello", 0), None);
+
+        let raw = "\n  \nline 1  \nline 2\n\nline 3\nline 4   \n\n   ";
+        assert_eq!(extract_recent_output(raw, 60).as_deref(), Some("line 1\nline 2\n\nline 3\nline 4"));
+        assert_eq!(extract_recent_output(raw, 2).as_deref(), Some("line 3\nline 4"));
+        assert_eq!(extract_recent_output(raw, 3).as_deref(), Some("line 2\n\nline 3\nline 4"));
+    }
+
+    #[test]
+    fn format_shell_quote_block_uses_safe_fence_and_preserves_blank_lines() {
+        assert_eq!(
+            format_shell_quote_block("cargo test\n\nfailed"),
+            "> ```\n> cargo test\n>\n> failed\n> ```"
+        );
+        assert_eq!(
+            format_shell_quote_block("echo ```nested```"),
+            "> ````\n> echo ```nested```\n> ````"
+        );
+    }
+
+    #[test]
+    fn selection_takes_precedence_over_recent_output() {
+        let cx = gpui::TestAppContext::single();
+        let (terminal, rx, _, _) = Terminal::build(&SpawnSpec::default(), 40, 6);
+        {
+            let mut term = terminal.term.lock();
+            let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+            parser.advance(&mut *term, b"first line\r\nsecond line\r\nthird line");
+        }
+        let view = cx.update(|app| app.new(|cx| TerminalView::new(terminal, rx, cx)));
+        let recent = cx.update(|app| view.read(app).selection_or_recent_output(2));
+        assert_eq!(recent.as_deref(), Some("second line\nthird line"));
+
+        cx.update(|app| {
+            let mut term = view.read(app).terminal.term.lock();
+            let mut sel = Selection::new(SelectionType::Simple, GridPoint::new(Line(0), Column(0)), Side::Left);
+            sel.update(GridPoint::new(Line(0), Column(4)), Side::Right);
+            term.selection = Some(sel);
+        });
+        let selected = cx.update(|app| view.read(app).selection_or_recent_output(60));
+        assert_eq!(selected.as_deref(), Some("first"));
+    }
 }

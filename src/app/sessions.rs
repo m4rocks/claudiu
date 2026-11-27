@@ -539,6 +539,7 @@ impl Workspace {
                 ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
                 ThreadEvent::CancelCompaction => { ws.compacting.remove(&sub_id); },
                 ThreadEvent::WorktreeSwitched { folder, session_id } => ws.finish_worktree_switch(&sub_id, folder.clone(), session_id.clone(), window, cx),
+                ThreadEvent::ReviewDiff { model, patch } => ws.spawn_review_subagent(&sub_id, model.clone(), patch, window, cx),
                 ThreadEvent::WorktreeSwitchFailed { folder, error } => ws.fail_worktree_switch(&sub_id, folder, error, cx),
             }
         });
