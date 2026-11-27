@@ -24,14 +24,20 @@ pub(super) enum TurnActionKind {
         effort_label: String,
         option_id: String,
     },
-    EditRewind {
-        prompt: String,
-    },
     RetryWithModel {
         prompt: String,
         target: CatalogModel,
     },
     RestoreOnly,
+}
+
+/// A rewind staged in the composer (via the Rewind button or double-Escape on the latest message).
+/// Sending the composer message restores any checkpoints from `row` onward, truncates the conversation
+/// before `row`, and starts a fresh harness turn with the edited message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PendingRewind {
+    pub row: usize,
+    pub checkpoints: usize,
 }
 
 pub(super) struct RetryConfirm {
@@ -87,6 +93,7 @@ fn strip_retry_prefixes(mut text: &str) -> &str {
 pub(super) enum UserNotice {
     ResentHigherThinking { effort: String },
     ResentWithModel { model: String },
+    Rewound { #[serde(default)] restored_checkpoints: usize },
 }
 
 impl UserNotice {
@@ -94,6 +101,9 @@ impl UserNotice {
         match self {
             Self::ResentHigherThinking { effort } => format!("Resent with {effort} thinking"),
             Self::ResentWithModel { model } => format!("Resent with {model}"),
+            Self::Rewound { restored_checkpoints: 0 } => "Rewound".to_string(),
+            Self::Rewound { restored_checkpoints: 1 } => "Rewound · restored 1 checkpoint".to_string(),
+            Self::Rewound { restored_checkpoints } => format!("Rewound · restored {restored_checkpoints} checkpoints"),
         }
     }
 }
@@ -131,7 +141,7 @@ impl UserAction {
 }
 
 /// Whether `entry` is a visible message typed by the user (not a hidden prompt or subagent report).
-pub(super) fn is_visible_user_entry(entry: &Entry) -> bool {
+pub(crate) fn is_visible_user_entry(entry: &Entry) -> bool {
     matches!(
         entry,
         Entry::User(text)
@@ -198,6 +208,15 @@ pub(crate) fn clear_timestamps(record: &str) {
     }
 }
 
+pub(crate) fn truncate_timestamps(record: &str, keep_count: usize) {
+    if record.is_empty() {
+        return;
+    }
+    let mut timestamps = load_timestamps(record);
+    timestamps.retain(|&ordinal, _| ordinal < keep_count);
+    save_timestamps(record, &timestamps);
+}
+
 fn notices_path(record: &str) -> PathBuf {
     crate::datadir::data_dir().join("user-notices").join(format!("{}.json", crate::datadir::safe_file_stem(record)))
 }
@@ -229,6 +248,24 @@ pub(crate) fn clear_notices(record: &str) {
     if !record.is_empty() {
         let _ = std::fs::remove_file(notices_path(record));
     }
+}
+
+pub(crate) fn truncate_notices(record: &str, keep_count: usize) {
+    if record.is_empty() {
+        return;
+    }
+    let mut notices = load_notices(record);
+    notices.retain(|&ordinal, _| ordinal < keep_count);
+    save_notices(record, &notices);
+}
+
+pub(crate) fn record_rewound_notice(record: &str, ordinal: usize, restored_checkpoints: usize) {
+    if record.is_empty() {
+        return;
+    }
+    let mut notices = load_notices(record);
+    notices.insert(ordinal, UserNotice::Rewound { restored_checkpoints });
+    save_notices(record, &notices);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,19 +381,17 @@ enum NextThinking {
     Higher(String, String, String),
 }
 
-/// Restore `turns` (`(id, cwd, before, patch_path)`) from newest to oldest. If any step fails partway through,
-/// re-apply every already-reversed patch forward so the working tree is never left half rolled back.
+/// Restore `turns` (`(id, cwd, before, patch_path)`) from newest to oldest. Reads all patches before modifying
+/// the working tree, and if any step fails partway through, re-applies already-reversed patches forward.
 fn restore_checkpoints_atomic(turns: Vec<(Uuid, PathBuf, String, PathBuf)>) -> Result<Vec<Uuid>, String> {
-    let mut restored_ids = Vec::with_capacity(turns.len());
-    let mut applied: Vec<(PathBuf, String)> = Vec::with_capacity(turns.len());
+    let mut loaded = Vec::with_capacity(turns.len());
     for (id, cwd, before, path) in turns {
-        let patch = match std::fs::read_to_string(&path) {
-            Ok(p) => p,
-            Err(error) => {
-                rollback_applied(&applied);
-                return Err(error.to_string());
-            }
-        };
+        let patch = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        loaded.push((id, cwd, before, patch));
+    }
+    let mut restored_ids = Vec::with_capacity(loaded.len());
+    let mut applied: Vec<(PathBuf, String)> = Vec::with_capacity(loaded.len());
+    for (id, cwd, before, patch) in loaded {
         if let Err(error) = snapshot::restore(&cwd, &before, &patch) {
             rollback_applied(&applied);
             return Err(error);
@@ -437,8 +472,8 @@ impl ThreadView {
         self.latest_visible_user_row() == Some(row)
     }
 
-    /// Unified gate matching `send_next` plus retry/capture/handoff guards.
-    fn retry_block_reason(&self) -> Option<&'static str> {
+    /// Shared gate for per-message actions that mutate files or restart the session.
+    fn rewind_block_reason(&self) -> Option<&'static str> {
         if self.retrying_turn || self.pending_retry.is_some() {
             Some("Restoring checkpoint and retrying…")
         } else if self.working || self.preparing.is_some() || !self.steering.is_empty() || self.has_background_work() || self.capturing_reviews > 0 {
@@ -447,8 +482,6 @@ impl ThreadView {
             Some("Wait for checkpoint restore to finish")
         } else if self.phase != Phase::Ready {
             Some("Session is not ready")
-        } else if self.pending_model.is_some() {
-            Some("Clear the pending model switch before retrying")
         } else if self.authentication_required
             || self.workspace_switching
             || self.permission_changing
@@ -458,6 +491,17 @@ impl ThreadView {
             || !self.options_in_flight.is_empty()
         {
             Some("Finish the pending session action before retrying")
+        } else {
+            None
+        }
+    }
+
+    /// Unified gate matching `send_next` plus retry/capture/handoff guards.
+    fn retry_block_reason(&self) -> Option<&'static str> {
+        if let Some(reason) = self.rewind_block_reason() {
+            Some(reason)
+        } else if self.pending_model.is_some() {
+            Some("Clear the pending model switch before retrying")
         } else {
             None
         }
@@ -541,25 +585,26 @@ impl ThreadView {
             on_dropdown: None,
         });
 
-        // 2. Edit & rewind from any message
-        let (edit_tip, edit_enabled) = if active_row {
+        // 2. Rewind conversation (and file checkpoints) to this message
+        let rewind_block = self.rewind_block_reason();
+        let (rewind_tip, rewind_enabled) = if active_row {
             ("Wait for the current turn to finish".to_string(), false)
-        } else if let Some(reason) = block {
+        } else if let Some(reason) = rewind_block {
             (reason.to_string(), false)
-        } else if has_own {
-            ("Restore checkpoint & edit message".to_string(), true)
+        } else if checkpoints.len() == 1 {
+            ("Rewind to this message & restore checkpoint".to_string(), true)
         } else if !checkpoints.is_empty() {
-            ("Restore later checkpoints & edit message".to_string(), true)
+            (format!("Rewind to this message & restore {} checkpoints", checkpoints.len()), true)
         } else {
-            ("Edit & resend message".to_string(), true)
+            ("Rewind to this message".to_string(), true)
         };
         actions.push(UserAction {
-            id: SharedString::from(format!("user-edit-rewind-{row}")),
-            icon: IconName::Pencil,
-            tooltip: SharedString::from(edit_tip),
-            on_click: edit_enabled.then(|| {
+            id: SharedString::from(format!("user-rewind-{row}")),
+            icon: IconName::Undo2,
+            tooltip: SharedString::from(rewind_tip),
+            on_click: rewind_enabled.then(|| {
                 Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
-                    v.request_edit_rewind(row, window, cx);
+                    v.stage_rewind(row, window, cx);
                 }) as ActionHandler
             }),
             on_dropdown: None,
@@ -705,19 +750,83 @@ impl ThreadView {
         }
     }
 
-    pub(super) fn request_edit_rewind(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
+    /// Stage a true rewind to `row`: loads the message into the composer and shows a warning banner above it.
+    /// Sending the message executes the rewind (restoring checkpoints and deleting everything from `row` onward).
+    pub(super) fn stage_rewind(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rewind_block_reason().is_some() || self.is_active_user_row(row) {
             return;
         }
         let Some(Entry::User(prompt)) = self.thread.entries.get(row) else { return };
         let prompt = strip_retry_prefixes(prompt).to_string();
-        if !self.retry_checkpoints_for(row).is_empty() {
-            self.open_confirm_for_checkpoints(row, TurnActionKind::EditRewind { prompt }, window, cx);
-        } else {
-            self.set_draft(&prompt, window, cx);
-            self.focus_composer(window, cx);
+        let checkpoints = self.retry_checkpoints_for(row).len();
+        self.pending_rewind = Some(PendingRewind { row, checkpoints });
+        self.history_at = None;
+        self.set_draft(&prompt, window, cx);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Stage a rewind to the latest visible user message (triggered by double-pressing Escape).
+    pub(super) fn stage_rewind_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.latest_visible_user_row() else { return };
+        self.stage_rewind(row, window, cx);
+    }
+
+    /// Execute a staged rewind upon sending: restore any checkpoints from `rewind.row` onward, then emit
+    /// `ThreadEvent::Rewind` so the workspace truncates the thread and starts a fresh session up to `rewind.row`.
+    pub(super) fn begin_rewind(
+        &mut self,
+        rewind: PendingRewind,
+        message: String,
+        target_model: Option<CatalogModel>,
+        effort: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(reason) = self.rewind_block_reason() {
+            self.pending_rewind = Some(rewind);
+            self.pending_model = target_model;
+            self.pending_effort = effort;
+            self.pending_edit_draft = Some(message);
+            let at = self.thread.notice(format!("Could not rewind: {reason}."), true);
+            self.remeasure(at);
             cx.notify();
+            return;
         }
+        let turns: Vec<(Uuid, PathBuf, String, PathBuf)> = self
+            .retry_checkpoints_for(rewind.row)
+            .into_iter()
+            .map(|turn| (turn.id, turn.cwd.clone(), turn.before.clone(), review::patch_path(&self.record_id, turn.id)))
+            .collect();
+        if turns.is_empty() {
+            cx.emit(ThreadEvent::Rewind { row: rewind.row, message, target_model, effort, restored_checkpoints: 0 });
+            cx.notify();
+            return;
+        }
+        self.retrying_turn = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { restore_checkpoints_atomic(turns) }).await;
+            let _ = this.update(cx, |v, cx| {
+                v.retrying_turn = false;
+                match result {
+                    Ok(restored_ids) => {
+                        let restored_checkpoints = restored_ids.len();
+                        v.turn_reviews.retain(|turn| !restored_ids.contains(&turn.id));
+                        review::prune_turn_reviews_by_ids(&v.record_id, &restored_ids, cx.background_executor());
+                        cx.emit(ThreadEvent::Rewind { row: rewind.row, message, target_model, effort, restored_checkpoints });
+                    }
+                    Err(error) => {
+                        v.pending_rewind = Some(rewind);
+                        v.pending_model = target_model;
+                        v.pending_effort = effort;
+                        v.pending_edit_draft = Some(message);
+                        let at = v.thread.notice(format!("Could not restore checkpoint: {error}"), true);
+                        v.remeasure(at);
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     pub(super) fn request_restore_only(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -839,10 +948,6 @@ impl ThreadView {
         match kind {
             TurnActionKind::RetryHigherThinking { prompt, effort, effort_label, option_id } => {
                 self.begin_live_retry(row, prompt, option_id, effort, effort_label, restored_ids, cx);
-            }
-            TurnActionKind::EditRewind { prompt } => {
-                self.prune_restored_checkpoints(&restored_ids, cx);
-                self.pending_edit_draft = Some(prompt);
             }
             TurnActionKind::RetryWithModel { prompt, target } => {
                 self.begin_model_retry(row, prompt, target, restored_ids, cx);
@@ -1156,26 +1261,21 @@ impl ThreadView {
             TurnActionKind::RetryHigherThinking { effort_label, .. } => {
                 let title = if restores_files { "Restore checkpoint & retry?" } else { "Retry with higher thinking?" };
                 let detail = if restores_files {
-                    format!("This restores {scope} back to before your message, then retries with {effort_label} thinking. Restore is blocked if those files changed since.")
+                    format!("This restores {scope} back to before your message, then retries with {effort_label} thinking.")
                 } else {
                     format!("This switches thinking to {effort_label} and resends your message. No file checkpoints will be reverted.")
                 };
                 let label = if restores_files { format!("Restore & retry ({effort_label})") } else { format!("Retry ({effort_label})") };
                 (title, detail, label)
             }
-            TurnActionKind::EditRewind { .. } => (
-                "Restore checkpoint & edit message?",
-                format!("This restores {scope} back to before your message and loads your prompt into the composer to edit. Restore is blocked if those files changed since."),
-                "Restore & edit".to_string(),
-            ),
             TurnActionKind::RetryWithModel { target, .. } => (
                 "Restore checkpoint & retry with model?",
-                format!("This restores {scope} back to before your message, then retries using {}. Restore is blocked if those files changed since.", target.name),
+                format!("This restores {scope} back to before your message, then retries using {}.", target.name),
                 format!("Restore & retry ({})", target.name),
             ),
             TurnActionKind::RestoreOnly => (
                 "Restore files to checkpoint?",
-                format!("This restores {scope} back to before your message without resending anything. Restore is blocked if those files changed since."),
+                format!("This restores {scope} back to before your message without resending anything."),
                 "Restore files".to_string(),
             ),
         };
@@ -1406,7 +1506,7 @@ mod tests {
         std::fs::write(&p1, &patch1).unwrap();
         let _ = patch1_path;
 
-        // Manual edit to a.txt between turn 1 and turn 2 breaks turn 1's restore check
+        // Manual overlapping edit to a.txt between turn 1 and turn 2:
         std::fs::write(&a, "a_manual\n").unwrap();
 
         // Turn 2 edits b.txt
@@ -1415,13 +1515,22 @@ mod tests {
         let patch2 = snapshot::capture(dir.path(), &before2).unwrap();
         std::fs::write(&p2, &patch2).unwrap();
 
-        // Attempting to restore turn 2 then turn 1 must fail on turn 1 AND re-apply turn 2 so b.txt stays "b1\n".
+        // If turn 1's snapshot commit is missing AND its patch conflicts, turn 1 fails AND turn 2 rolls back forward.
         let err = restore_checkpoints_atomic(vec![
-            (Uuid::new_v4(), dir.path().into(), before2, p2),
-            (Uuid::new_v4(), dir.path().into(), before1, p1),
+            (Uuid::new_v4(), dir.path().into(), before2.clone(), p2.clone()),
+            (Uuid::new_v4(), dir.path().into(), "0000000000000000000000000000000000000000".into(), p1.clone()),
         ]);
         assert!(err.is_err());
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "a_manual\n");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "b1\n", "turn 2 must be rolled back forward when turn 1 fails");
+
+        // With valid before1 snapshot, restoring both turns succeeds even after the manual edit to a.txt.
+        let ok = restore_checkpoints_atomic(vec![
+            (Uuid::new_v4(), dir.path().into(), before2, p2),
+            (Uuid::new_v4(), dir.path().into(), before1, p1),
+        ]);
+        assert!(ok.is_ok());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a0\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b0\n");
     }
 }

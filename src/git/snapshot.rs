@@ -203,12 +203,110 @@ pub fn forget_checkpoint(cwd: &Path, record: &str, id: uuid::Uuid) {
     let _ = git_with(cwd, &["update-ref", "-d", &checkpoint_ref(record, id)], None, &[]);
 }
 
-/// Restore a turn as a single patch, only when the checkout still matches its captured end state.
-pub fn restore(cwd: &Path, before: &str, patch: &str) -> Result<(), String> {
-    if capture(cwd, before)? != patch {
-        return Err("The checkout has changed since that turn.".into());
+/// Split a unified `git diff` into per-file `(relative_path, file_patch)` pairs.
+fn split_file_patches(patch: &str) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let (mut old, mut new) = (None::<String>, None::<String>);
+    let mut in_header = false;
+    let flush = |out: &mut Vec<(PathBuf, String)>, current: &mut String, old: &mut Option<String>, new: &mut Option<String>| {
+        if !current.is_empty()
+            && let Some(path) = new.take().or_else(|| old.take())
+        {
+            out.push((PathBuf::from(path), std::mem::take(current)));
+        } else {
+            current.clear();
+            *old = None;
+            *new = None;
+        }
+    };
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            flush(&mut out, &mut current, &mut old, &mut new);
+            in_header = true;
+        }
+        if in_header {
+            if line.starts_with("@@") {
+                in_header = false;
+            } else if let Some(path) = line.strip_prefix("--- a/") {
+                old = Some(path.trim_end_matches('\t').to_string());
+            } else if let Some(path) = line.strip_prefix("+++ b/") {
+                new = Some(path.trim_end_matches('\t').to_string());
+            } else if let Some(paths) = line.strip_prefix("diff --git a/")
+                && let Some((path, _)) = paths.rsplit_once(" b/")
+            {
+                old = Some(path.to_string());
+            }
+        }
+        current.push_str(line);
+        current.push('\n');
     }
-    git_with(&root(cwd)?, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(patch), &[]).map(|_| ())
+    flush(&mut out, &mut current, &mut old, &mut new);
+    out
+}
+
+/// Restore a single working-tree file directly from the `before` snapshot commit using a temporary index so the
+/// user's own git index and HEAD are never modified. Removes the file if it did not exist in `before`.
+fn restore_file_from_snapshot(root: &Path, before: &str, path: &Path) -> Result<(), String> {
+    let git_path = path.to_string_lossy().replace('\\', "/");
+    let spec = format!("{before}:{git_path}");
+    if git_with(root, &["cat-file", "-e", &spec], None, &[]).is_ok() {
+        let index = TempIndex::new()?;
+        let env: &[(&str, &OsStr)] = &[("GIT_INDEX_FILE", index.path())];
+        git_with(root, &["read-tree", before], None, env)?;
+        git_with(root, &["checkout-index", "-f", "--", &git_path], None, env)?;
+    } else {
+        let full = root.join(path);
+        if full.exists() {
+            std::fs::remove_file(&full).map_err(|error| error.to_string())?;
+        }
+        let mut parent = full.parent();
+        while let Some(dir) = parent {
+            if dir == root {
+                break;
+            }
+            if std::fs::remove_dir(dir).is_err() {
+                break;
+            }
+            parent = dir.parent();
+        }
+    }
+    Ok(())
+}
+
+/// Restore the files touched by a turn back to before that turn:
+/// 1. Try `git apply --reverse` on the full patch first — this preserves any edits made by the user or another
+///    agent in unrelated files AND in non-overlapping regions of the same files.
+/// 2. If a file has overlapping edits (or binary/add/delete divergence), reverse-apply every non-conflicting file
+///    first and restore only the conflicting files directly from the `before` snapshot commit via a throwaway index.
+///
+/// Returns the paths that required direct snapshot fallback (empty when every file reversed cleanly).
+pub fn restore(cwd: &Path, before: &str, patch: &str) -> Result<Vec<PathBuf>, String> {
+    if patch.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = root(cwd)?;
+    let root = root.as_path();
+    let Err(apply_err) = git_with(root, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(patch), &[]) else {
+        return Ok(Vec::new());
+    };
+    let rev = format!("{before}^{{commit}}");
+    if git_with(root, &["cat-file", "-e", &rev], None, &[]).is_err() {
+        return Err(apply_err);
+    }
+    let file_patches = split_file_patches(patch);
+    if file_patches.is_empty() {
+        return Err(apply_err);
+    }
+    let mut fallback_files = Vec::new();
+    for (path, file_patch) in file_patches {
+        if git_with(root, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(&file_patch), &[]).is_ok() {
+            continue;
+        }
+        restore_file_from_snapshot(root, before, &path)?;
+        fallback_files.push(path);
+    }
+    Ok(fallback_files)
 }
 
 /// Put one hunk back as it was in the snapshot. Fails, leaving the file alone, when the file has changed since the
@@ -312,26 +410,65 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_restore_rejects_later_edits_and_restores_new_binary_files() {
+    fn checkpoint_restore_preserves_unrelated_and_non_overlapping_edits_and_handles_overlapping_edits() {
         let dir = repo();
-        let text = dir.path().join("note.txt");
+        let touched = dir.path().join("note.txt");
+        let unrelated = dir.path().join("other.txt");
         let binary = dir.path().join("new.bin");
-        std::fs::write(&text, "before\n").unwrap();
+        let lines: String = (1..=15).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&touched, &lines).unwrap();
+        std::fs::write(&unrelated, "orig\n").unwrap();
         commit_all(dir.path());
+
         let before = take(dir.path(), "s").unwrap();
-        std::fs::write(&text, "after\n").unwrap();
+        // Agent edits line 2 of note.txt and creates new.bin.
+        std::fs::write(&touched, lines.replace("line 2\n", "agent 2\n")).unwrap();
         std::fs::write(&binary, [0, 1, 2, 3]).unwrap();
         let patch = capture(dir.path(), &before).unwrap();
         assert_eq!(parse(&patch).iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
             [PathBuf::from("new.bin"), PathBuf::from("note.txt")]);
-        std::fs::write(&text, "later\n").unwrap();
-        assert!(restore(dir.path(), &before, &patch).is_err());
-        assert!(binary.exists());
-        assert_eq!(std::fs::read_to_string(&text).unwrap(), "later\n");
+
+        // User/another model edits an unrelated file AND a non-overlapping line (line 14) of note.txt.
+        std::fs::write(&unrelated, "user edit\n").unwrap();
+        let with_user_edit = std::fs::read_to_string(&touched).unwrap().replace("line 14\n", "user 14\n");
+        std::fs::write(&touched, &with_user_edit).unwrap();
+
+        let fallback = restore(dir.path(), &before, &patch).unwrap();
+        assert!(fallback.is_empty(), "non-overlapping edits should reverse-apply cleanly without fallback");
+        assert!(!binary.exists(), "new binary file from the turn is removed");
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "user edit\n", "unrelated edit is untouched");
+        let restored = std::fs::read_to_string(&touched).unwrap();
+        assert!(restored.contains("line 2\n") && restored.contains("user 14\n"), "agent hunk reverted while user edit stayed: {restored}");
+
+        // Now test overlapping edit on the exact same line: falls back to snapshot commit without touching index.
+        let before2 = take(dir.path(), "s").unwrap();
+        std::fs::write(&touched, "agent rewrite\n").unwrap();
+        let patch2 = capture(dir.path(), &before2).unwrap();
+        std::fs::write(&touched, "overlapping user edit\n").unwrap();
+        let status_before = String::from_utf8(
+            std::process::Command::new("git").args(["diff", "--cached"]).current_dir(dir.path()).output().unwrap().stdout,
+        ).unwrap();
+        let fallback2 = restore(dir.path(), &before2, &patch2).unwrap();
+        assert_eq!(fallback2, vec![PathBuf::from("note.txt")]);
+        assert_eq!(std::fs::read_to_string(&touched).unwrap(), restored);
+        let status_after = String::from_utf8(
+            std::process::Command::new("git").args(["diff", "--cached"]).current_dir(dir.path()).output().unwrap().stdout,
+        ).unwrap();
+        assert_eq!(status_after, status_before, "user git index must remain untouched");
+    }
+
+    #[test]
+    fn checkpoint_restore_errors_when_patch_conflicts_and_snapshot_is_missing() {
+        let dir = repo();
+        let text = dir.path().join("note.txt");
+        std::fs::write(&text, "before\n").unwrap();
+        commit_all(dir.path());
+        let before = take(dir.path(), "s").unwrap();
         std::fs::write(&text, "after\n").unwrap();
-        restore(dir.path(), &before, &patch).unwrap();
-        assert!(!binary.exists());
-        assert_eq!(std::fs::read_to_string(text).unwrap(), "before\n");
+        let patch = capture(dir.path(), &before).unwrap();
+        std::fs::write(&text, "conflict\n").unwrap();
+        assert!(restore(dir.path(), "0000000000000000000000000000000000000000", &patch).is_err());
+        assert_eq!(std::fs::read_to_string(&text).unwrap(), "conflict\n");
     }
 
     #[test]

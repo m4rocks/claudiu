@@ -534,6 +534,9 @@ impl Workspace {
                     }
                     ws.toast("Command copied. Paste it in the shell to run it.", cx);
                 }
+                ThreadEvent::Rewind { row, message, target_model, effort, restored_checkpoints } => {
+                    ws.rewind_session(&sub_id, *row, message.clone(), target_model.clone(), effort.clone(), *restored_checkpoints, window, cx);
+                }
                 ThreadEvent::Fork(end) => ws.fork_thread(&sub_id, *end, window, cx),
                 ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
                 ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),

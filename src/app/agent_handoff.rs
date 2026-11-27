@@ -18,6 +18,7 @@ pub struct Pending {
 pub(super) enum Replacement {
     Handoff,
     Permission,
+    Rewind,
 }
 
 impl Workspace {
@@ -158,6 +159,114 @@ impl Workspace {
         }
     }
 
+    /// Truly rewind session `id` to before entry `row`: delete `row` and all later entries/metadata, then start a
+    /// fresh ACP session in place seeded only with the conversation before `row` and sending `message`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn rewind_session(
+        &mut self,
+        id: &str,
+        row: usize,
+        message: String,
+        target_model: Option<crate::harness::CatalogModel>,
+        effort: Option<String>,
+        restored_checkpoints: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        let switching_worktree = self.switching_worktree.contains_key(id);
+        if switching_worktree || self.pending_handoffs.contains_key(id) || self.compacting.contains_key(id) {
+            thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
+            let reason = if switching_worktree { "Wait for the worktree switch to finish." }
+                else if self.compacting.contains_key(id) { "Wait for compaction to finish." }
+                else { "Another session transition is already starting." };
+            self.toast(reason, cx);
+            return;
+        }
+        let Some(mut rec) = self.store.session(id).cloned() else { return };
+        let cwd = rec.cwd.clone();
+        let mut meta = rec.agent.clone().unwrap_or_default();
+        let (from_name, kept_entries, rewind_ordinal, permission, live_model, live_effort) = {
+            let t = thread.read(cx);
+            let cut = row.min(t.thread.entries.len());
+            let kept = t.thread.entries[..cut].to_vec();
+            let ordinal = kept.iter().filter(|e| crate::thread::is_visible_user_entry(e)).count();
+            let live_model = t.thread.option("model").map(|o| o.current.clone()).filter(|m| !m.is_empty());
+            let live_effort = t.thread.option("thought_level").map(|o| o.current.clone()).filter(|e| !e.is_empty());
+            (t.harness.name(), kept, ordinal, t.permission_for_relaunch(), live_model, live_effort)
+        };
+        let transcript = {
+            let mut prior = crate::harness::thread::Thread::default();
+            prior.entries = kept_entries.clone();
+            prior.transcript(LAST_ENTRIES)
+        };
+        let prompt = if transcript.trim().is_empty() {
+            message.clone()
+        } else {
+            crate::harness::thread::handoff_prompt(from_name, &transcript, &message)
+        };
+        if let Some(target) = target_model.filter(|m| self.store.data.settings.harness_enabled(m.harness)) {
+            meta.harness = target.harness;
+            meta.chosen_model = (!target.id.is_empty()).then_some(target.id);
+        } else if live_model.is_some() {
+            meta.chosen_model = live_model;
+        }
+        if let Some(level) = effort.clone().or(live_effort) {
+            meta.chosen_effort = Some(level);
+        }
+        meta.session_id.clear();
+        meta.provider_sessions.clear();
+        meta.transcript = None;
+        meta.context_tokens = None;
+        meta.context_fraction = None;
+        meta.context_window = None;
+        meta.cache_ttl = None;
+        meta.model = None;
+        meta.managed_compaction = true;
+        rec.agent = Some(meta.clone());
+
+        let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), Some(prompt), Starter::User, cx) else {
+            thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
+            self.toast("Could not start the rewound session.", cx);
+            return;
+        };
+        if meta.parent_session.is_none() && permission.is_some() {
+            start.permission = permission;
+        }
+        start.prior_entries = kept_entries.clone();
+        if let Some(model_id) = meta.chosen_model.clone().filter(|m| !m.is_empty()) {
+            start.options.retain(|(cat, _)| *cat != "model");
+            start.options.push(("model", model_id));
+        }
+        if let Some(level) = meta.chosen_effort.clone().filter(|e| !e.is_empty()) {
+            start.options.retain(|(cat, _)| *cat != "thought_level");
+            start.options.push(("thought_level", level));
+        }
+
+        // Truncate persisted transcript and per-message metadata so the rewound thread loads cleanly.
+        if kept_entries.is_empty() {
+            let _ = crate::harness::thread::clear_entries(id);
+        } else {
+            crate::harness::thread::save_entries(id, &kept_entries);
+        }
+        crate::thread::truncate_timestamps(id, rewind_ordinal);
+        crate::thread::truncate_notices(id, rewind_ordinal);
+        crate::thread::record_rewound_notice(id, rewind_ordinal, restored_checkpoints);
+        crate::thread::prune_turn_reviews_from_row(id, kept_entries.len(), cx.background_executor());
+        crate::thread::clear_queue(id);
+
+        let Some(index) = self.live.iter().position(|live| live.id == id) else { return };
+        thread.update(cx, |v, cx| v.hold_workspace_switch(true, cx));
+        let source = self.live.remove(index);
+        self.pending_handoffs.insert(id.into(), Pending { source, meta, draft: Some(message), kind: Replacement::Rewind });
+        let foreground = self.active_id().is_some_and(|a| a == id);
+        let shell = self.shells.remove(id);
+        self.start_thread_with_focus(rec, start, false, foreground, window, cx);
+        if let Some(shell) = shell {
+            self.shells.insert(id.into(), shell);
+        }
+    }
+
     pub(super) fn commit_handoff(&mut self, id: &str, session_id: &str, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut pending) = self.pending_handoffs.remove(id) else { return };
         pending.meta.session_id = session_id.to_string();
@@ -175,6 +284,13 @@ impl Workspace {
             view.update(cx, |v, cx| {
                 let row = v.thread.finish_notice(NoticeKind::Handoff, format!("Switched to {label}"), false);
                 v.remeasure(row);
+                v.persist_entries();
+                cx.notify();
+            });
+        } else if matches!(pending.kind, Replacement::Rewind)
+            && let Some(view) = self.live_view(id).and_then(|v| v.thread()).cloned()
+        {
+            view.update(cx, |v, cx| {
                 v.persist_entries();
                 cx.notify();
             });
@@ -211,7 +327,11 @@ impl Workspace {
                     view.paste_text(&draft, window, cx);
                 }
                 view.hold_workspace_switch(false, cx);
-                let action = match pending.kind { Replacement::Handoff => "Handoff", Replacement::Permission => "Permission change" };
+                let action = match pending.kind {
+                    Replacement::Handoff => "Handoff",
+                    Replacement::Permission => "Permission change",
+                    Replacement::Rewind => "Rewind",
+                };
                 view.fail_handoff(format!("{action} failed. The original session is still open. {error}"), cx);
             });
         }

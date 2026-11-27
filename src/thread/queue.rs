@@ -59,6 +59,12 @@ pub(super) fn load(record: &str) -> VecDeque<Queued> {
     load_from(&path(record))
 }
 
+pub(crate) fn clear(record: &str) {
+    if !record.is_empty() {
+        let _ = std::fs::remove_file(path(record));
+    }
+}
+
 fn load_from(path: &std::path::Path) -> VecDeque<Queued> {
     std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }

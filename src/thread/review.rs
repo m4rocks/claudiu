@@ -95,6 +95,14 @@ pub(crate) fn prune_turn_reviews_by_ids(record: &str, ids: &[Uuid], executor: &g
     }
 }
 
+pub(crate) fn prune_turn_reviews_from_row(record: &str, row: usize, executor: &gpui::BackgroundExecutor) {
+    if record.is_empty() {
+        return;
+    }
+    let ids: Vec<Uuid> = load_turn_reviews(record).into_iter().filter(|turn| turn.row >= row).map(|turn| turn.id).collect();
+    prune_turn_reviews_by_ids(record, &ids, executor);
+}
+
 pub(super) fn load_turn_reviews(record: &str) -> Vec<TurnReview> {
     if record.is_empty() {
         return Vec::new();
@@ -601,7 +609,9 @@ impl ThreadView {
                 let Some(review) = v.review.as_mut().filter(|review| review.id == id) else { return };
                 review.restoring = false;
                 match result {
-                    Ok(()) => {
+                    Ok(_) => {
+                        v.turn_reviews.retain(|turn| turn.id != id);
+                        prune_turn_reviews_by_ids(&v.record_id, &[id], cx.background_executor());
                         v.close_review(cx);
                         let at = v.thread.notice("Restored files to checkpoint", false);
                         v.remeasure(at);

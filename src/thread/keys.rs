@@ -25,8 +25,8 @@ pub enum Key {
     ChooseHighlighted,
     /// Space on a multi-select question with nothing typed: toggle the highlighted option.
     ToggleHighlighted,
-    /// Escape twice with nothing typed: bring the last message back to edit.
-    EditLast,
+    /// Escape twice with nothing typed: stage a rewind to the last user message.
+    RewindLast,
     /// Escape twice, or Ctrl+C, with text typed: clear it.
     Clear,
     /// Shift+Tab: the next permission mode.
@@ -78,7 +78,7 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
         "escape" if plain && s.picker_open => Some(Key::ClosePicker),
         "escape" if plain && (s.question_open || s.question > 0) => Some(Key::Decline),
         "escape" if plain && s.working => Some(Key::Interrupt),
-        "escape" if plain && s.escape_just_pressed => Some(if s.draft_empty { Key::EditLast } else { Key::Clear }),
+        "escape" if plain && s.escape_just_pressed => Some(if s.draft_empty { Key::RewindLast } else { Key::Clear }),
         "c" if m.control && !m.platform && !m.alt && !m.shift && s.working => Some(Key::Interrupt),
         "c" if m.control && !m.platform && !m.alt && !m.shift && !s.draft_empty => Some(Key::Clear),
         "tab" if m.shift && !m.control && !m.alt && !m.platform => Some(Key::CycleMode),
@@ -125,7 +125,7 @@ mod tests {
     fn escape_interrupts_a_turn_and_twice_edits_the_last_message() {
         assert_eq!(press("escape", State { working: true, ..idle() }), Some(Key::Interrupt));
         assert_eq!(press("escape", idle()), None, "once while idle does nothing yet");
-        assert_eq!(press("escape", State { escape_just_pressed: true, ..idle() }), Some(Key::EditLast));
+        assert_eq!(press("escape", State { escape_just_pressed: true, ..idle() }), Some(Key::RewindLast));
         assert_eq!(press("escape", State { escape_just_pressed: true, draft_empty: false, ..idle() }), Some(Key::Clear));
     }
 

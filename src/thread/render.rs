@@ -1448,6 +1448,30 @@ impl ThreadView {
             inner = inner.child(menu);
         }
 
+        if let Some(rewind) = &self.pending_rewind {
+            let message = match rewind.checkpoints {
+                0 => "Rewinding to this message will delete later messages".to_string(),
+                1 => "Rewinding to this message will delete later messages and restore 1 file checkpoint".to_string(),
+                n => format!("Rewinding to this message will delete later messages and restore {n} file checkpoints"),
+            };
+            inner = inner.child(
+                crate::panels::ui::notice::notice(message, crate::panels::ui::alert::Tone::Warning)
+                    .child(
+                        div()
+                            .id("cancel-rewind-stage")
+                            .cursor_pointer()
+                            .text_color(theme().warning)
+                            .hover(|s| s.text_color(theme().foreground))
+                            .child(icon(IconName::X, 12.0))
+                            .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                                v.pending_rewind = None;
+                                v.focus_composer(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
         if let Some(target) = &self.pending_model {
             inner = inner.child(
                 crate::panels::ui::notice::notice(format!("Next message switches to {}", target.name), crate::panels::ui::alert::Tone::Default)

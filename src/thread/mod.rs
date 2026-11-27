@@ -8,16 +8,17 @@ mod keys;
 mod outline;
 pub use outline::TurnOutlineItem;
 mod queue;
+pub(crate) use queue::clear as clear_queue;
 mod render;
 mod review;
-pub(crate) use review::{REVIEW_DIFF_MAX_CHARS, build_review_prompt, clear_turn_reviews};
+pub(crate) use review::{REVIEW_DIFF_MAX_CHARS, build_review_prompt, clear_turn_reviews, prune_turn_reviews_from_row};
 mod timeline;
 mod find;
 mod telemetry;
 mod notices;
 pub(crate) use telemetry::exhausted_usage;
 mod user_actions;
-pub(crate) use user_actions::{clear_notices, clear_timestamps};
+pub(crate) use user_actions::{clear_notices, clear_timestamps, is_visible_user_entry, record_rewound_notice, truncate_notices, truncate_timestamps};
 
 pub use render::short_effort_label;
 
@@ -156,6 +157,9 @@ pub enum ThreadEvent {
     Select(String),
     /// Built-in `/new [prompt]` command: start a new session in this project.
     NewSession(Option<String>),
+    /// Rewind the conversation to before `row` (deleting `row` and all later entries), and send `message` in a fresh
+    /// harness session seeded with the earlier history.
+    Rewind { row: usize, message: String, target_model: Option<CatalogModel>, effort: Option<String>, restored_checkpoints: usize },
     Fork(usize),
     OpenToolShell(String),
     /// Built-in `/clear` command: clear this session's conversation and start fresh in place.
@@ -544,8 +548,10 @@ pub struct ThreadView {
     retry_confirm: Option<user_actions::RetryConfirm>,
     /// Model picker dialog state for "Retry with another model".
     retry_model_picker: Option<user_actions::RetryModelPicker>,
-    /// Draft text queued by an async Edit & Rewind restore, applied to the composer on next render.
+    /// Draft text queued by an async rewind/restore failure, applied to the composer on next render.
     pending_edit_draft: Option<String>,
+    /// Staged rewind target (from clicking Rewind or double-pressing Escape on the latest message).
+    pending_rewind: Option<user_actions::PendingRewind>,
     /// Row index and sequence number of the most recently copied message (for brief Check icon feedback).
     copied_row: Option<(usize, u64)>,
     copied_seq: u64,
@@ -772,6 +778,7 @@ impl ThreadView {
             retry_confirm: None,
             retry_model_picker: None,
             pending_edit_draft: None,
+            pending_rewind: None,
             copied_row: None,
             copied_seq: 0,
             retrying_turn: false,
@@ -2051,6 +2058,13 @@ impl ThreadView {
     }
 
     fn send_as(&mut self, text: String, follow_up: crate::store::FollowUp, cx: &mut Context<Self>) {
+        if let Some(rewind) = self.pending_rewind.take() {
+            let target_model = self.pending_model.take();
+            let effort = self.pending_effort.take();
+            self.picker = None;
+            self.begin_rewind(rewind, text, target_model, effort, cx);
+            return;
+        }
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
             if self.working || self.compaction.running {
@@ -3126,13 +3140,10 @@ impl ThreadView {
                     };
                 }
             }
-            keys::Key::EditLast => {
-                if let Some(last) = self.thread.sent_texts().pop() {
-                    self.set_draft(&last, window, cx);
-                }
-            }
+            keys::Key::RewindLast => self.stage_rewind_latest(window, cx),
             keys::Key::Clear => {
                 self.history_at = None;
+                self.pending_rewind = None;
                 if self.attachments_enabled() {
                     self.attachments = Default::default();
                 }
@@ -4686,7 +4697,7 @@ mod tests {
             v.phase = super::Phase::Ready;
             let actions = v.user_actions_for(0);
             assert!(find_action(&actions, "user-retry-higher-0").is_none());
-            assert!(find_action(&actions, "user-edit-rewind-0").unwrap().on_click.is_some());
+            assert!(find_action(&actions, "user-rewind-0").unwrap().on_click.is_some());
             assert!(find_action(&actions, "user-fork-0").unwrap().on_click.is_some());
             assert!(find_action(&actions, "user-restore-only-0").is_none(), "no checkpoint yet");
         });
@@ -4728,8 +4739,8 @@ mod tests {
             let restore = find_action(&actions, "user-restore-only-0").expect("restore-only button should exist");
             assert!(restore.on_click.is_some());
             assert_eq!(restore.tooltip.as_ref(), "Restore files to before this message");
-            let edit = find_action(&actions, "user-edit-rewind-0").expect("edit-rewind button should exist");
-            assert_eq!(edit.tooltip.as_ref(), "Restore checkpoint & edit message");
+            let rewind = find_action(&actions, "user-rewind-0").expect("rewind button should exist");
+            assert_eq!(rewind.tooltip.as_ref(), "Rewind to this message & restore checkpoint");
         });
         cx.update(|window, app| {
             view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
@@ -4753,16 +4764,16 @@ mod tests {
             view.update(app, |v, cx| v.cancel_retry_turn(window, cx));
         });
 
-        // Edit & rewind with checkpoint opens confirmation dialog.
+        // Rewind with checkpoint stages the rewind in the composer without a modal dialog.
         cx.update(|window, app| {
-            view.update(app, |v, cx| v.request_edit_rewind(0, window, cx));
+            view.update(app, |v, cx| v.stage_rewind(0, window, cx));
         });
-        view.read_with(cx, |v, _| {
-            assert!(matches!(v.retry_confirm.as_ref().map(|c| &c.kind), Some(super::user_actions::TurnActionKind::EditRewind { .. })));
+        view.read_with(cx, |v, cx| {
+            assert!(v.retry_confirm.is_none());
+            assert_eq!(v.pending_rewind, Some(super::user_actions::PendingRewind { row: 0, checkpoints: 1 }));
+            assert_eq!(v.composer.read(cx).value().as_ref(), "Refactor the parser");
         });
-        cx.update(|window, app| {
-            view.update(app, |v, cx| v.cancel_retry_turn(window, cx));
-        });
+        view.update(cx, |v, _| v.pending_rewind = None);
 
         // Already at Max -> stays visible but disabled with explanatory tooltip.
         view.update(cx, |v, _| {
@@ -4812,17 +4823,19 @@ mod tests {
             assert!(matches!(v.thread.entries.last(), Some(Entry::Notice { error: true, .. })));
         });
 
-        // Without a checkpoint -> Edit & rewind loads prompt directly into composer without confirmation.
+        // Without a checkpoint -> stage_rewind_latest (same path as Esc Esc) stages rewind and loads prompt into composer.
         view.update(cx, |v, _| {
             v.turn_reviews.clear();
         });
         cx.update(|window, app| {
-            view.update(app, |v, cx| v.request_edit_rewind(0, window, cx));
+            view.update(app, |v, cx| v.stage_rewind_latest(window, cx));
         });
         view.read_with(cx, |v, cx| {
             assert!(v.retry_confirm.is_none());
+            assert_eq!(v.pending_rewind, Some(super::user_actions::PendingRewind { row: 0, checkpoints: 0 }));
             assert_eq!(v.composer.read(cx).value().as_ref(), "Refactor the parser");
         });
+        view.update(cx, |v, _| v.pending_rewind = None);
 
         // Retry with another model: same harness switches model option and attaches ResentWithModel notice.
         view.update(cx, |v, _| {
@@ -4969,6 +4982,97 @@ mod tests {
             let queued = v.queue.front().map(|q| q.text.as_str()).unwrap_or_default();
             assert!(queued.contains("Update hello.txt"), "queued retry should contain the original prompt");
             assert!(queued.contains("restored the files"), "queued retry should note that files were restored");
+        });
+    }
+
+    #[gpui::test]
+    fn rewind_button_and_double_escape_stage_and_emit_true_rewind(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["config", "core.autocrlf", "false"],
+        ] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).status().unwrap().success());
+        }
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "v0\n").unwrap();
+        assert!(std::process::Command::new("git").args(["add", "."]).current_dir(dir.path()).status().unwrap().success());
+        assert!(std::process::Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(dir.path()).status().unwrap().success());
+
+        let record_id = format!("test-rewind-{}", uuid::Uuid::new_v4());
+        let turn_id = uuid::Uuid::new_v4();
+        let before = crate::git::snapshot::take(dir.path(), &record_id).unwrap();
+        std::fs::write(&file, "v1\n").unwrap();
+        let patch = crate::git::snapshot::capture(dir.path(), &before).unwrap();
+        super::review::write_turn_patch(&record_id, turn_id, &patch).unwrap();
+        crate::git::snapshot::keep_checkpoint(dir.path(), &record_id, turn_id, &before).unwrap();
+        // Simulate a later user edit on the same file to verify checkpoint restore still succeeds on rewind.
+        std::fs::write(&file, "v1-user-edited\n").unwrap();
+
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.record_id = record_id;
+        let mut thread = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| super::ThreadView::new(start, window, cx));
+            thread = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = thread.unwrap();
+
+        let rewound: std::rc::Rc<std::cell::RefCell<Option<(usize, String, usize)>>> = Default::default();
+        let rewound_sub = rewound.clone();
+        let _sub = cx.update(|_, app| {
+            app.subscribe(&view, move |_, ev: &super::ThreadEvent, _| {
+                if let super::ThreadEvent::Rewind { row, message, restored_checkpoints, .. } = ev {
+                    *rewound_sub.borrow_mut() = Some((*row, message.clone(), *restored_checkpoints));
+                }
+            })
+        });
+
+        view.update(cx, |v, _| {
+            v.phase = super::Phase::Ready;
+            v.thread.entries = vec![
+                Entry::User("First prompt".into()),
+                Entry::Agent("First reply".into()),
+                Entry::User("Second prompt".into()),
+                Entry::Agent("Second reply".into()),
+            ];
+            v.turn_reviews.push(super::review::TurnReview {
+                id: turn_id,
+                row: 2,
+                end: 4,
+                text: "Second prompt".into(),
+                before,
+                cwd: dir.path().into(),
+                file_count: 1,
+                checkpoint: true,
+            });
+        });
+
+        // Double-Escape path stages rewind on the latest user message (row 2) with 1 checkpoint.
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.stage_rewind_latest(window, cx));
+        });
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.pending_rewind, Some(super::user_actions::PendingRewind { row: 2, checkpoints: 1 }));
+            assert_eq!(v.composer.read(cx).value().as_ref(), "Second prompt");
+        });
+
+        // Sending executes the checkpoint restore and emits ThreadEvent::Rewind for row 2.
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.send("Second prompt edited".into(), window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v0\n", "rewind must restore checkpoint even after user edit");
+        assert_eq!(rewound.borrow().as_ref(), Some(&(2, "Second prompt edited".to_string(), 1)));
+        view.read_with(cx, |v, _| {
+            assert!(v.pending_rewind.is_none());
+            assert!(v.turn_reviews.is_empty());
         });
     }
 
