@@ -536,11 +536,18 @@ pub struct ThreadView {
     user_notices: BTreeMap<usize, user_actions::UserNotice>,
     /// True once persisted notices have finished loading from disk.
     notices_loaded: bool,
-    /// Confirmation dialog state when retrying a turn that will restore checkpoint files.
+    /// Confirmation dialog state when a per-message action will restore checkpoint files.
     retry_confirm: Option<user_actions::RetryConfirm>,
-    /// True while restoring checkpoint files before retrying a turn.
+    /// Model picker dialog state for "Retry with another model".
+    retry_model_picker: Option<user_actions::RetryModelPicker>,
+    /// Draft text queued by an async Edit & Rewind restore, applied to the composer on next render.
+    pending_edit_draft: Option<String>,
+    /// Row index and sequence number of the most recently copied message (for brief Check icon feedback).
+    copied_row: Option<(usize, u64)>,
+    copied_seq: u64,
+    /// True while restoring checkpoint files before retrying/rewinding a turn.
     retrying_turn: bool,
-    /// Retry waiting for `thought_level` option confirmation before dispatching.
+    /// Retry waiting for `thought_level` or `model` option confirmation before dispatching.
     pending_retry: Option<user_actions::PendingRetry>,
     _subscriptions: Vec<Subscription>,
 }
@@ -759,6 +766,10 @@ impl ThreadView {
             user_notices: BTreeMap::new(),
             notices_loaded: false,
             retry_confirm: None,
+            retry_model_picker: None,
+            pending_edit_draft: None,
+            copied_row: None,
+            copied_seq: 0,
             retrying_turn: false,
             pending_retry: None,
             _subscriptions: subscriptions,
@@ -4636,40 +4647,50 @@ mod tests {
         });
         let view = thread.unwrap();
 
+        fn find_action<'a>(actions: &'a [super::user_actions::UserAction], id: &str) -> Option<&'a super::user_actions::UserAction> {
+            actions.iter().find(|a| a.id.as_ref() == id)
+        }
+
         // While the harness is loading (Phase::Starting), the retry button stays visible and disabled.
         view.update(cx, |v, _| {
             v.phase = super::Phase::Starting;
             let actions = v.user_actions_for(0);
-            assert_eq!(actions.len(), 1);
-            assert!(actions[0].on_click.is_none());
-            assert_eq!(actions[0].tooltip.as_ref(), "Session is not ready");
+            let retry = find_action(&actions, "user-retry-higher-0").expect("retry button should exist");
+            assert!(retry.on_click.is_none());
+            assert_eq!(retry.tooltip.as_ref(), "Session is not ready");
+            assert!(find_action(&actions, "user-copy-0").unwrap().on_click.is_some(), "copy is always enabled");
         });
 
-        // Once ready, without a live `thought_level` option -> retry button is hidden (cannot apply higher thinking).
+        // Once ready, without a live `thought_level` option -> retry-higher button is hidden (cannot apply higher thinking).
         view.update(cx, |v, _| {
             v.phase = super::Phase::Ready;
-            assert!(v.user_actions_for(0).is_empty());
+            let actions = v.user_actions_for(0);
+            assert!(find_action(&actions, "user-retry-higher-0").is_none());
+            assert!(find_action(&actions, "user-edit-rewind-0").unwrap().on_click.is_some());
+            assert!(find_action(&actions, "user-fork-0").unwrap().on_click.is_some());
+            assert!(find_action(&actions, "user-restore-only-0").is_none(), "no checkpoint yet");
         });
 
         // With live `thought_level` at Medium -> retry offers High thinking without checkpoint.
         view.update(cx, |v, _| {
             v.thread.config = vec![live_thought_option("medium")];
             let actions = v.user_actions_for(0);
-            assert_eq!(actions.len(), 1);
-            assert!(actions[0].on_click.is_some());
-            assert_eq!(actions[0].tooltip.as_ref(), "Retry with High thinking");
+            let retry = find_action(&actions, "user-retry-higher-0").expect("retry button should exist");
+            assert!(retry.on_click.is_some());
+            assert_eq!(retry.tooltip.as_ref(), "Retry with High thinking");
         });
 
         // With a pending cross-harness model switch -> disabled so retry won't trigger a handoff.
         view.update(cx, |v, _| {
             v.pending_model = Some(super::CatalogModel { harness: Harness::Codex, id: "gpt".into(), name: "GPT".into() });
             let actions = v.user_actions_for(0);
-            assert!(actions[0].on_click.is_none());
-            assert_eq!(actions[0].tooltip.as_ref(), "Clear the pending model switch before retrying");
+            let retry = find_action(&actions, "user-retry-higher-0").expect("retry button should exist");
+            assert!(retry.on_click.is_none());
+            assert_eq!(retry.tooltip.as_ref(), "Clear the pending model switch before retrying");
             v.pending_model = None;
         });
 
-        // With a checkpoint on turn 0 -> tooltip mentions restoring checkpoint, and clicking opens confirm dialog.
+        // With a checkpoint on turn 0 -> tooltip mentions restoring checkpoint, restore-only appears, and clicking opens confirm dialog.
         view.update(cx, |v, _| {
             v.turn_reviews.push(super::review::TurnReview {
                 id: uuid::Uuid::new_v4(),
@@ -4682,7 +4703,13 @@ mod tests {
                 checkpoint: true,
             });
             let actions = v.user_actions_for(0);
-            assert_eq!(actions[0].tooltip.as_ref(), "Restore checkpoint & retry with High thinking");
+            let retry = find_action(&actions, "user-retry-higher-0").expect("retry button should exist");
+            assert_eq!(retry.tooltip.as_ref(), "Restore checkpoint & retry with High thinking");
+            let restore = find_action(&actions, "user-restore-only-0").expect("restore-only button should exist");
+            assert!(restore.on_click.is_some());
+            assert_eq!(restore.tooltip.as_ref(), "Restore files to before this message");
+            let edit = find_action(&actions, "user-edit-rewind-0").expect("edit-rewind button should exist");
+            assert_eq!(edit.tooltip.as_ref(), "Restore checkpoint & edit message");
         });
         cx.update(|window, app| {
             view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
@@ -4695,13 +4722,35 @@ mod tests {
         });
         view.read_with(cx, |v, _| assert!(v.retry_confirm.is_none()));
 
+        // Restore-only opens confirmation dialog.
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.request_restore_only(0, window, cx));
+        });
+        view.read_with(cx, |v, _| {
+            assert!(matches!(v.retry_confirm.as_ref().map(|c| &c.kind), Some(super::user_actions::TurnActionKind::RestoreOnly)));
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.cancel_retry_turn(window, cx));
+        });
+
+        // Edit & rewind with checkpoint opens confirmation dialog.
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.request_edit_rewind(0, window, cx));
+        });
+        view.read_with(cx, |v, _| {
+            assert!(matches!(v.retry_confirm.as_ref().map(|c| &c.kind), Some(super::user_actions::TurnActionKind::EditRewind { .. })));
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.cancel_retry_turn(window, cx));
+        });
+
         // Already at Max -> stays visible but disabled with explanatory tooltip.
         view.update(cx, |v, _| {
             v.thread.config = vec![live_thought_option("max")];
             let actions = v.user_actions_for(0);
-            assert_eq!(actions.len(), 1);
-            assert!(actions[0].on_click.is_none());
-            assert_eq!(actions[0].tooltip.as_ref(), "Already at max thinking");
+            let retry = find_action(&actions, "user-retry-higher-0").expect("retry button should exist");
+            assert!(retry.on_click.is_none());
+            assert_eq!(retry.tooltip.as_ref(), "Already at max thinking");
         });
 
         // Rejected option change cancels the pending retry instead of sending at the old level.
@@ -4709,8 +4758,9 @@ mod tests {
             v.thread.config = vec![live_thought_option("medium")];
             v.pending_retry = Some(super::user_actions::PendingRetry {
                 option_id: "effort".into(),
-                expected_effort: "high".into(),
-                effort_label: "High".into(),
+                expected_value: "high".into(),
+                notice: super::user_actions::UserNotice::ResentHigherThinking { effort: "High".into() },
+                failure_message: "Could not switch to higher thinking; retry cancelled.",
                 prompt: "Refactor the parser".into(),
                 expected_permission: None,
                 expected_mode: None,
@@ -4728,8 +4778,9 @@ mod tests {
             v.thread.mode = Some("default".into());
             v.pending_retry = Some(super::user_actions::PendingRetry {
                 option_id: "effort".into(),
-                expected_effort: "high".into(),
-                effort_label: "High".into(),
+                expected_value: "high".into(),
+                notice: super::user_actions::UserNotice::ResentHigherThinking { effort: "High".into() },
+                failure_message: "Could not switch to higher thinking; retry cancelled.",
                 prompt: "Refactor the parser".into(),
                 expected_permission: Some(super::Permission::ReadOnly),
                 expected_mode: Some("plan".into()),
@@ -4739,6 +4790,62 @@ mod tests {
             assert!(v.pending_retry.is_none());
             assert!(v.queue.is_empty(), "drifted permission mode must not send retry");
             assert!(matches!(v.thread.entries.last(), Some(Entry::Notice { error: true, .. })));
+        });
+
+        // Without a checkpoint -> Edit & rewind loads prompt directly into composer without confirmation.
+        view.update(cx, |v, _| {
+            v.turn_reviews.clear();
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.request_edit_rewind(0, window, cx));
+        });
+        view.read_with(cx, |v, cx| {
+            assert!(v.retry_confirm.is_none());
+            assert_eq!(v.composer.read(cx).value().as_ref(), "Refactor the parser");
+        });
+
+        // Retry with another model: same harness switches model option and attaches ResentWithModel notice.
+        view.update(cx, |v, _| {
+            v.all_models = vec![
+                super::CatalogModel { harness: Harness::Claude, id: "sonnet".into(), name: "Sonnet".into() },
+                super::CatalogModel { harness: Harness::Claude, id: "opus".into(), name: "Opus".into() },
+                super::CatalogModel { harness: Harness::Codex, id: "gpt".into(), name: "GPT".into() },
+            ];
+            v.thread.config = vec![
+                live_thought_option("medium"),
+                crate::harness::thread::ConfigOption {
+                    id: "model".into(),
+                    name: "Model".into(),
+                    category: "model".into(),
+                    current: "sonnet".into(),
+                    choices: vec![("sonnet".into(), "Sonnet".into()), ("opus".into(), "Opus".into())],
+                },
+            ];
+            let actions = v.user_actions_for(0);
+            assert!(find_action(&actions, "user-retry-model-0").unwrap().on_click.is_some());
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| {
+                v.select_retry_model(
+                    0,
+                    super::CatalogModel { harness: Harness::Claude, id: "opus".into(), name: "Opus".into() },
+                    window,
+                    cx,
+                );
+            });
+        });
+        view.read_with(cx, |v, _| {
+            let front = v.queue.front().expect("model retry should enqueue at front");
+            assert_eq!(front.notice, Some(super::user_actions::UserNotice::ResentWithModel { model: "Opus".into() }));
+        });
+        view.update(cx, |v, _| v.queue.clear());
+
+        // Copy message sets copied_row feedback.
+        view.update(cx, |v, cx| {
+            v.copy_entry(0, cx);
+            assert!(v.copied_row.is_some_and(|(r, _)| r == 0));
+            v.copy_entry(1, cx);
+            assert!(v.copied_row.is_some_and(|(r, _)| r == 1));
         });
 
         // Without a checkpoint -> retries immediately without a confirmation dialog, bumps effort,

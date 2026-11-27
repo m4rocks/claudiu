@@ -1,29 +1,48 @@
-//! Extensible per-user-message metadata and actions: sent timestamp and action buttons (starting with
-//! "Restore checkpoint & retry with higher thinking").
+//! Extensible per-message metadata and actions: sent timestamp and action buttons (copy, edit & rewind,
+//! restore checkpoint, retry with higher thinking, retry with another model, and fork session).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, px};
 use gpui_kit::{assets::IconName, base::{AlertDialog, AlertDialogDescription, AlertDialogPopup, AlertDialogTitle}};
 use uuid::Uuid;
 
-use super::{Phase, Queued, ThreadView, queue, review};
+use super::{Phase, Queued, ThreadEvent, ThreadView, queue, review};
 use crate::git::snapshot;
-use crate::harness::thread::Entry;
-use crate::panels::scale;
+use crate::harness::{CatalogModel, thread::Entry};
+use crate::panels::{logos, scale};
 use crate::panels::theme::theme;
 use crate::panels::ui::{button as btn, tooltip::tooltip};
 use crate::panels::widgets::icon;
 
+pub(super) enum TurnActionKind {
+    RetryHigherThinking {
+        prompt: String,
+        effort: String,
+        effort_label: String,
+        option_id: String,
+    },
+    EditRewind {
+        prompt: String,
+    },
+    RetryWithModel {
+        prompt: String,
+        target: CatalogModel,
+    },
+    RestoreOnly,
+}
+
 pub(super) struct RetryConfirm {
     pub row: usize,
-    pub prompt: String,
-    pub effort: String,
-    pub effort_label: String,
-    pub option_id: String,
+    pub kind: TurnActionKind,
     pub has_own_checkpoint: bool,
     pub later_checkpoints: usize,
+}
+
+pub(super) struct RetryModelPicker {
+    pub row: usize,
 }
 
 pub(super) const RETRY_RESTORED_LATEST_PREFIX: &str =
@@ -32,12 +51,14 @@ const RETRY_RESTORED_EARLIER_PREFIX: &str =
     "I restored the files to the checkpoint before an earlier message (undoing later file changes). Please retry that request:";
 const RETRY_EARLIER_PREFIX: &str = "Please revisit and retry this earlier request:";
 const RETRY_LATEST_PREFIX: &str = "Please retry this request with higher thinking:";
+const RETRY_MODEL_PREFIX: &str = "Please retry this request:";
 
 const RETRY_PREFIXES: &[&str] = &[
     RETRY_RESTORED_LATEST_PREFIX,
     RETRY_RESTORED_EARLIER_PREFIX,
     RETRY_EARLIER_PREFIX,
     RETRY_LATEST_PREFIX,
+    RETRY_MODEL_PREFIX,
 ];
 
 /// Strip quoted or legacy retry context so repeated retries do not stack it.
@@ -64,21 +85,24 @@ fn strip_retry_prefixes(mut text: &str) -> &str {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum UserNotice {
     ResentHigherThinking { effort: String },
+    ResentWithModel { model: String },
 }
 
 impl UserNotice {
     pub(super) fn text(&self) -> String {
         match self {
             Self::ResentHigherThinking { effort } => format!("Resent with {effort} thinking"),
+            Self::ResentWithModel { model } => format!("Resent with {model}"),
         }
     }
 }
 
-/// A retry waiting for the live `thought_level` option change (and permission preservation) to be confirmed before dispatching.
+/// A retry waiting for a live option change (`thought_level` or `model`) and permission preservation to be confirmed before dispatching.
 pub(super) struct PendingRetry {
     pub option_id: String,
-    pub expected_effort: String,
-    pub effort_label: String,
+    pub expected_value: String,
+    pub notice: UserNotice,
+    pub failure_message: &'static str,
     pub prompt: String,
     pub expected_permission: Option<crate::harness::permission::Permission>,
     pub expected_mode: Option<String>,
@@ -104,6 +128,16 @@ pub(super) fn is_visible_user_entry(entry: &Entry) -> bool {
             if !crate::harness::thread::is_hidden_prompt(text)
                 && crate::harness::thread::parse_subagent_report(text).is_none()
     )
+}
+
+/// Exclusive end index of the turn starting at visible user message `row` (up to the next visible user message, or `entries.len()`).
+pub(super) fn turn_end_for_row(entries: &[Entry], row: usize) -> usize {
+    entries
+        .iter()
+        .enumerate()
+        .skip(row.saturating_add(1))
+        .find_map(|(ix, entry)| is_visible_user_entry(entry).then_some(ix))
+        .unwrap_or(entries.len())
 }
 
 /// 0-based ordinal among visible user messages up to and including `row`. Stable across local notices and replays.
@@ -431,21 +465,128 @@ impl ThreadView {
         turns
     }
 
+    /// Models other than the currently active one, across all enabled harnesses.
+    pub(super) fn other_models_for_retry(&self) -> Vec<CatalogModel> {
+        let current_model_id = self
+            .thread
+            .option("model")
+            .map(|o| self.option_value(o))
+            .filter(|v| !v.is_empty() && *v != "default")
+            .or(self.initial_model.as_deref());
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for model in self.unified_models() {
+            if model.harness == self.harness && current_model_id.is_some_and(|cur| cur == model.id) {
+                continue;
+            }
+            if seen.insert((model.harness, model.id.clone())) {
+                out.push(model);
+            }
+        }
+        out
+    }
+
+    pub(super) fn copy_entry(&mut self, row: usize, cx: &mut Context<Self>) {
+        let text = match self.thread.entries.get(row) {
+            Some(Entry::User(text) | Entry::Agent(text)) if !text.is_empty() => text.clone(),
+            _ => return,
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.copied_seq = self.copied_seq.wrapping_add(1);
+        let seq = self.copied_seq;
+        self.copied_row = Some((row, seq));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.copied_row == Some((row, seq)) {
+                    v.copied_row = None;
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
+    fn is_recently_copied(&self, row: usize) -> bool {
+        self.copied_row.is_some_and(|(r, _)| r == row)
+    }
+
     /// Actions shown in the footer bar of the user message at `row`.
     pub(super) fn user_actions_for(&self, row: usize) -> Vec<UserAction> {
         let mut actions = Vec::new();
+        let block = self.retry_block_reason();
+        let active_row = self.is_active_user_row(row);
+        let checkpoints = self.retry_checkpoints_for(row);
+        let has_own = checkpoints.iter().any(|t| t.row == row);
+
+        // 1. Copy message (always enabled)
+        let copied = self.is_recently_copied(row);
+        actions.push(UserAction {
+            id: SharedString::from(format!("user-copy-{row}")),
+            icon: if copied { IconName::Check } else { IconName::Copy },
+            tooltip: SharedString::from(if copied { "Copied" } else { "Copy message" }),
+            on_click: Some(Box::new(move |v: &mut ThreadView, _: &mut Window, cx: &mut Context<ThreadView>| {
+                v.copy_entry(row, cx);
+            })),
+        });
+
+        // 2. Edit & rewind from any message
+        let (edit_tip, edit_enabled) = if active_row {
+            ("Wait for the current turn to finish".to_string(), false)
+        } else if let Some(reason) = block {
+            (reason.to_string(), false)
+        } else if has_own {
+            ("Restore checkpoint & edit message".to_string(), true)
+        } else if !checkpoints.is_empty() {
+            ("Restore later checkpoints & edit message".to_string(), true)
+        } else {
+            ("Edit & resend message".to_string(), true)
+        };
+        actions.push(UserAction {
+            id: SharedString::from(format!("user-edit-rewind-{row}")),
+            icon: IconName::Pencil,
+            tooltip: SharedString::from(edit_tip),
+            on_click: edit_enabled.then(|| {
+                Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
+                    v.request_edit_rewind(row, window, cx);
+                }) as ActionHandler
+            }),
+        });
+
+        // 3. Restore files to before this message (no resend) — shown when checkpoints exist
+        if !checkpoints.is_empty() {
+            let (restore_tip, restore_enabled) = if active_row {
+                ("Wait for the current turn to finish".to_string(), false)
+            } else if let Some(reason) = block {
+                (reason.to_string(), false)
+            } else if checkpoints.len() == 1 {
+                ("Restore files to before this message".to_string(), true)
+            } else {
+                (format!("Restore files across {} checkpoints", checkpoints.len()), true)
+            };
+            actions.push(UserAction {
+                id: SharedString::from(format!("user-restore-only-{row}")),
+                icon: IconName::ArchiveRestore,
+                tooltip: SharedString::from(restore_tip),
+                on_click: restore_enabled.then(|| {
+                    Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
+                        v.request_restore_only(row, window, cx);
+                    }) as ActionHandler
+                }),
+            });
+        }
+
+        // 4. Retry with higher thinking
         let next = self.next_higher_effort();
-        let (tooltip, enabled) = match (&next, self.retry_block_reason()) {
+        let higher_entry = match (&next, block) {
             (NextThinking::Unsupported, _) if self.phase != Phase::Ready || self.workspace_switching => {
-                (self.retry_block_reason().unwrap_or("Session is not ready").to_string(), false)
+                Some((block.unwrap_or("Session is not ready").to_string(), false))
             }
-            (NextThinking::Unsupported, _) => return actions,
-            (NextThinking::AtMax, _) => ("Already at max thinking".to_string(), false),
-            (_, _) if self.is_active_user_row(row) => ("Wait for the current turn to finish".to_string(), false),
-            (NextThinking::Higher(_, _, _), Some(reason)) => (reason.to_string(), false),
+            (NextThinking::Unsupported, _) => None,
+            (NextThinking::AtMax, _) => Some(("Already at max thinking".to_string(), false)),
+            (_, _) if active_row => Some(("Wait for the current turn to finish".to_string(), false)),
+            (NextThinking::Higher(_, _, _), Some(reason)) => Some((reason.to_string(), false)),
             (NextThinking::Higher(_, _, label), None) => {
-                let checkpoints = self.retry_checkpoints_for(row);
-                let has_own = checkpoints.iter().any(|t| t.row == row);
                 let tip = if has_own {
                     format!("Restore checkpoint & retry with {label} thinking")
                 } else if !checkpoints.is_empty() {
@@ -453,20 +594,80 @@ impl ThreadView {
                 } else {
                     format!("Retry with {label} thinking")
                 };
-                (tip, true)
+                Some((tip, true))
             }
         };
+        if let Some((tooltip, enabled)) = higher_entry {
+            actions.push(UserAction {
+                id: SharedString::from(format!("user-retry-higher-{row}")),
+                icon: IconName::Brain,
+                tooltip: SharedString::from(tooltip),
+                on_click: enabled.then(|| {
+                    Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
+                        v.request_retry_turn(row, window, cx);
+                    }) as ActionHandler
+                }),
+            });
+        }
+
+        // 5. Retry with another model / harness
+        let other_models = self.other_models_for_retry();
+        if !other_models.is_empty() {
+            let (model_tip, model_enabled) = if active_row {
+                ("Wait for the current turn to finish".to_string(), false)
+            } else if let Some(reason) = block {
+                (reason.to_string(), false)
+            } else if !checkpoints.is_empty() {
+                ("Restore checkpoint & retry with another model…".to_string(), true)
+            } else {
+                ("Retry with another model…".to_string(), true)
+            };
+            actions.push(UserAction {
+                id: SharedString::from(format!("user-retry-model-{row}")),
+                icon: IconName::RefreshCw,
+                tooltip: SharedString::from(model_tip),
+                on_click: model_enabled.then(|| {
+                    Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
+                        v.open_retry_model_picker(row, window, cx);
+                    }) as ActionHandler
+                }),
+            });
+        }
+
+        // 6. Fork session from here
+        let (fork_tip, fork_enabled) = if active_row {
+            ("Wait for the current turn to finish".to_string(), false)
+        } else if self.phase != Phase::Ready || self.workspace_switching {
+            (block.unwrap_or("Session is not ready").to_string(), false)
+        } else {
+            ("Fork session from here".to_string(), true)
+        };
         actions.push(UserAction {
-            id: SharedString::from(format!("user-retry-higher-{row}")),
-            icon: IconName::Brain,
-            tooltip: SharedString::from(tooltip),
-            on_click: enabled.then(|| {
-                Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
-                    v.request_retry_turn(row, window, cx);
+            id: SharedString::from(format!("user-fork-{row}")),
+            icon: IconName::GitBranch,
+            tooltip: SharedString::from(fork_tip),
+            on_click: fork_enabled.then(|| {
+                Box::new(move |v: &mut ThreadView, _: &mut Window, cx: &mut Context<ThreadView>| {
+                    v.request_fork_from_row(row, cx);
                 }) as ActionHandler
             }),
         });
+
         actions
+    }
+
+    fn open_confirm_for_checkpoints(&mut self, row: usize, kind: TurnActionKind, window: &mut Window, cx: &mut Context<Self>) {
+        let checkpoints = self.retry_checkpoints_for(row);
+        let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
+        let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
+        self.retry_confirm = Some(RetryConfirm {
+            row,
+            kind,
+            has_own_checkpoint,
+            later_checkpoints,
+        });
+        window.focus(&self.restore_focus, cx);
+        cx.notify();
     }
 
     pub(super) fn request_retry_turn(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -476,24 +677,93 @@ impl ThreadView {
         let Some(Entry::User(prompt)) = self.thread.entries.get(row) else { return };
         let NextThinking::Higher(option_id, effort, effort_label) = self.next_higher_effort() else { return };
         let prompt = strip_retry_prefixes(prompt).to_string();
-        let checkpoints = self.retry_checkpoints_for(row);
-        if !checkpoints.is_empty() {
-            let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
-            let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
-            self.retry_confirm = Some(RetryConfirm {
+        if !self.retry_checkpoints_for(row).is_empty() {
+            self.open_confirm_for_checkpoints(
                 row,
-                prompt,
-                effort,
-                effort_label,
-                option_id,
-                has_own_checkpoint,
-                later_checkpoints,
-            });
-            window.focus(&self.restore_focus, cx);
-            cx.notify();
+                TurnActionKind::RetryHigherThinking { prompt, effort, effort_label, option_id },
+                window,
+                cx,
+            );
         } else {
             self.begin_live_retry(row, prompt, option_id, effort, effort_label, Vec::new(), cx);
         }
+    }
+
+    pub(super) fn request_edit_rewind(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
+            return;
+        }
+        let Some(Entry::User(prompt)) = self.thread.entries.get(row) else { return };
+        let prompt = strip_retry_prefixes(prompt).to_string();
+        if !self.retry_checkpoints_for(row).is_empty() {
+            self.open_confirm_for_checkpoints(row, TurnActionKind::EditRewind { prompt }, window, cx);
+        } else {
+            self.set_draft(&prompt, window, cx);
+            self.focus_composer(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn request_restore_only(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
+            return;
+        }
+        if self.retry_checkpoints_for(row).is_empty() {
+            return;
+        }
+        self.open_confirm_for_checkpoints(row, TurnActionKind::RestoreOnly, window, cx);
+    }
+
+    pub(super) fn open_retry_model_picker(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
+            return;
+        }
+        if self.other_models_for_retry().is_empty() {
+            return;
+        }
+        self.retry_model_picker = Some(RetryModelPicker { row });
+        window.focus(&self.restore_focus, cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_retry_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retry_model_picker.take().is_some() {
+            self.focus_composer(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn select_retry_model(&mut self, row: usize, target: CatalogModel, window: &mut Window, cx: &mut Context<Self>) {
+        self.retry_model_picker = None;
+        if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
+            self.focus_composer(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(Entry::User(prompt)) = self.thread.entries.get(row) else {
+            self.focus_composer(window, cx);
+            cx.notify();
+            return;
+        };
+        let prompt = strip_retry_prefixes(prompt).to_string();
+        if !self.retry_checkpoints_for(row).is_empty() {
+            self.open_confirm_for_checkpoints(row, TurnActionKind::RetryWithModel { prompt, target }, window, cx);
+        } else {
+            self.focus_composer(window, cx);
+            self.begin_model_retry(row, prompt, target, Vec::new(), cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn request_fork_from_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        if self.phase != Phase::Ready || self.workspace_switching || self.is_active_user_row(row) {
+            return;
+        }
+        if !self.thread.entries.get(row).is_some_and(is_visible_user_entry) {
+            return;
+        }
+        let end = turn_end_for_row(&self.thread.entries, row);
+        cx.emit(ThreadEvent::Fork(end));
     }
 
     pub(super) fn cancel_retry_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -507,7 +777,7 @@ impl ThreadView {
         let Some(pending) = self.retry_confirm.take() else { return };
         self.focus_composer(window, cx);
         if let Some(reason) = self.retry_block_reason() {
-            let at = self.thread.notice(format!("Could not retry: {reason}."), true);
+            let at = self.thread.notice(format!("Could not complete action: {reason}."), true);
             self.remeasure(at);
             cx.notify();
             return;
@@ -518,7 +788,7 @@ impl ThreadView {
             .map(|turn| (turn.id, turn.cwd.clone(), turn.before.clone(), review::patch_path(&self.record_id, turn.id)))
             .collect();
         if turns.is_empty() {
-            self.begin_live_retry(pending.row, pending.prompt, pending.option_id, pending.effort, pending.effort_label, Vec::new(), cx);
+            self.finish_confirmed_action(pending.row, pending.kind, Vec::new(), cx);
             cx.notify();
             return;
         }
@@ -530,10 +800,10 @@ impl ThreadView {
                 v.retrying_turn = false;
                 match result {
                     Ok(restored_ids) => {
-                        v.begin_live_retry(pending.row, pending.prompt, pending.option_id, pending.effort, pending.effort_label, restored_ids, cx);
+                        v.finish_confirmed_action(pending.row, pending.kind, restored_ids, cx);
                     }
                     Err(error) => {
-                        let at = v.thread.notice(format!("Could not restore checkpoint to retry: {error}"), true);
+                        let at = v.thread.notice(format!("Could not restore checkpoint: {error}"), true);
                         v.remeasure(at);
                         v.send_next(cx);
                     }
@@ -541,6 +811,58 @@ impl ThreadView {
                 cx.notify();
             });
         }).detach();
+    }
+
+    fn finish_confirmed_action(&mut self, row: usize, kind: TurnActionKind, restored_ids: Vec<Uuid>, cx: &mut Context<Self>) {
+        match kind {
+            TurnActionKind::RetryHigherThinking { prompt, effort, effort_label, option_id } => {
+                self.begin_live_retry(row, prompt, option_id, effort, effort_label, restored_ids, cx);
+            }
+            TurnActionKind::EditRewind { prompt } => {
+                self.prune_restored_checkpoints(&restored_ids, cx);
+                self.pending_edit_draft = Some(prompt);
+            }
+            TurnActionKind::RetryWithModel { prompt, target } => {
+                self.begin_model_retry(row, prompt, target, restored_ids, cx);
+            }
+            TurnActionKind::RestoreOnly => {
+                self.prune_restored_checkpoints(&restored_ids, cx);
+            }
+        }
+    }
+
+    fn prune_restored_checkpoints(&mut self, restored_ids: &[Uuid], cx: &mut Context<Self>) -> bool {
+        if restored_ids.is_empty() {
+            return false;
+        }
+        let count = restored_ids.len();
+        self.turn_reviews.retain(|turn| !restored_ids.contains(&turn.id));
+        review::prune_turn_reviews_by_ids(&self.record_id, restored_ids, cx.background_executor());
+        let notice = if count == 1 {
+            "Restored files to checkpoint".to_string()
+        } else {
+            format!("Restored files across {count} checkpoints")
+        };
+        let at = self.thread.notice(notice, false);
+        self.remeasure(at);
+        self.persist_entries();
+        true
+    }
+
+    fn build_retry_outgoing(&self, row: usize, prompt: String, restored_files: bool, latest_prefix: &str) -> String {
+        let is_latest = self.latest_visible_user_row() == Some(row);
+        if restored_files && is_latest {
+            crate::harness::thread::prepend_quote(RETRY_RESTORED_LATEST_PREFIX, &prompt)
+        } else if restored_files {
+            crate::harness::thread::prepend_quote(RETRY_RESTORED_EARLIER_PREFIX, &prompt)
+        } else if is_latest && prompt.starts_with('/') {
+            // A native command must still start the prompt to be recognized by the adapter.
+            prompt
+        } else if is_latest {
+            crate::harness::thread::prepend_quote(latest_prefix, &prompt)
+        } else {
+            crate::harness::thread::prepend_quote(RETRY_EARLIER_PREFIX, &prompt)
+        }
     }
 
     /// Keep the live session (preserving provider prompt caching and permission mode), bump `thought_level` in place,
@@ -556,40 +878,16 @@ impl ThreadView {
         restored_ids: Vec<Uuid>,
         cx: &mut Context<Self>,
     ) {
-        let restored_files = !restored_ids.is_empty();
-        if restored_files {
-            let count = restored_ids.len();
-            self.turn_reviews.retain(|turn| !restored_ids.contains(&turn.id));
-            review::prune_turn_reviews_by_ids(&self.record_id, &restored_ids, cx.background_executor());
-            let notice = if count == 1 {
-                "Restored files to checkpoint".to_string()
-            } else {
-                format!("Restored files across {count} checkpoints")
-            };
-            let at = self.thread.notice(notice, false);
-            self.remeasure(at);
-            self.persist_entries();
-        }
-        let is_latest = self.latest_visible_user_row() == Some(row);
-        let outgoing = if restored_files && is_latest {
-            crate::harness::thread::prepend_quote(RETRY_RESTORED_LATEST_PREFIX, &prompt)
-        } else if restored_files {
-            crate::harness::thread::prepend_quote(RETRY_RESTORED_EARLIER_PREFIX, &prompt)
-        } else if is_latest && prompt.starts_with('/') {
-            // A native command must still start the prompt to be recognized by the adapter.
-            prompt
-        } else if is_latest {
-            crate::harness::thread::prepend_quote(RETRY_LATEST_PREFIX, &prompt)
-        } else {
-            crate::harness::thread::prepend_quote(RETRY_EARLIER_PREFIX, &prompt)
-        };
+        let restored_files = self.prune_restored_checkpoints(&restored_ids, cx);
+        let outgoing = self.build_retry_outgoing(row, prompt, restored_files, RETRY_LATEST_PREFIX);
         let expected_permission = self.handoff_permission();
         let expected_mode = self.thread.mode.clone();
         self.pending_effort = Some(effort.clone());
         self.pending_retry = Some(PendingRetry {
             option_id: option_id.clone(),
-            expected_effort: effort.clone(),
-            effort_label,
+            expected_value: effort.clone(),
+            notice: UserNotice::ResentHigherThinking { effort: effort_label },
+            failure_message: "Could not switch to higher thinking; retry cancelled.",
             prompt: outgoing,
             expected_permission,
             expected_mode,
@@ -603,8 +901,54 @@ impl ThreadView {
         }
     }
 
-    /// Called once all in-flight session options (or permission restoration) settle. Verifies that the requested higher
-    /// thinking level took effect and that the session's permission mode was preserved before sending the retry.
+    /// Retry a turn on another model: either switch the live `model` option on the current harness,
+    /// or hand off in place to another harness via `ThreadEvent::Handoff`.
+    fn begin_model_retry(
+        &mut self,
+        row: usize,
+        prompt: String,
+        target: CatalogModel,
+        restored_ids: Vec<Uuid>,
+        cx: &mut Context<Self>,
+    ) {
+        let restored_files = self.prune_restored_checkpoints(&restored_ids, cx);
+        let outgoing = self.build_retry_outgoing(row, prompt, restored_files, RETRY_MODEL_PREFIX);
+        if target.harness != self.harness {
+            cx.emit(ThreadEvent::Handoff {
+                to: target.harness,
+                model: Some(target.id),
+                message: outgoing,
+                effort: None,
+                by_agent: false,
+            });
+            return;
+        }
+        let Some(option_id) = self.thread.option("model").map(|o| o.id.clone()) else {
+            let at = self.thread.notice("This session does not support switching models in place.", true);
+            self.remeasure(at);
+            return;
+        };
+        let expected_permission = self.handoff_permission();
+        let expected_mode = self.thread.mode.clone();
+        self.pending_retry = Some(PendingRetry {
+            option_id: option_id.clone(),
+            expected_value: target.id.clone(),
+            notice: UserNotice::ResentWithModel { model: target.name },
+            failure_message: "Could not switch model; retry cancelled.",
+            prompt: outgoing,
+            expected_permission,
+            expected_mode,
+            permission_restored: false,
+        });
+        if self.connection.is_some() && self.session_id.is_some() {
+            self.set_option(option_id, target.id, cx);
+        } else {
+            self.dispatch_pending_retry(cx);
+        }
+    }
+
+    /// Called once all in-flight session options (or permission restoration) settle. Verifies that the requested option
+    /// took effect and that the session's permission mode was preserved before sending the retry.
     pub(super) fn complete_pending_retry(&mut self, cx: &mut Context<Self>) {
         let Some(retry) = self.pending_retry.as_ref() else { return };
         let applied = self
@@ -612,9 +956,10 @@ impl ThreadView {
             .config
             .iter()
             .find(|o| o.id == retry.option_id)
-            .is_some_and(|o| o.current == retry.expected_effort);
+            .is_some_and(|o| o.current == retry.expected_value);
         if !applied {
-            self.cancel_pending_retry("Could not switch to higher thinking; retry cancelled.", cx);
+            let msg = retry.failure_message;
+            self.cancel_pending_retry(msg, cx);
             return;
         }
         let expected_permission = retry.expected_permission;
@@ -661,7 +1006,7 @@ impl ThreadView {
         let mut item = Queued::new(retry.prompt, true);
         item.ahead = true;
         item.order = queue::next_order();
-        item.notice = Some(UserNotice::ResentHigherThinking { effort: retry.effort_label });
+        item.notice = Some(retry.notice);
         self.queue.push_front(item);
         self.queue_changed();
         self.send_next(cx);
@@ -671,6 +1016,42 @@ impl ThreadView {
         let ordinal = visible_user_ordinal(&self.thread.entries, row)?;
         let notice = self.user_notices.get(&ordinal)?;
         Some(crate::panels::ui::notice::notice(notice.text(), crate::panels::ui::alert::Tone::Default).into_any_element())
+    }
+
+    pub(super) fn render_agent_footer(&self, row: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(Entry::Agent(text)) = self.thread.entries.get(row) else { return None };
+        if text.trim().is_empty() {
+            return None;
+        }
+        let copied = self.is_recently_copied(row);
+        let tip = if copied { "Copied" } else { "Copy message" };
+        let copy_btn = div()
+            .id(SharedString::from(format!("agent-copy-{row}")))
+            .size(px(20.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(theme().subtle_foreground)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
+            .tooltip(tooltip(tip))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                v.copy_entry(row, cx);
+            }))
+            .child(icon(if copied { IconName::Check } else { IconName::Copy }, 12.5));
+        Some(
+            div()
+                .w_full()
+                .px(px(2.0))
+                .flex()
+                .items_center()
+                .justify_end()
+                .child(copy_btn)
+                .into_any_element(),
+        )
     }
 
     pub(super) fn render_user_footer(&self, row: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -751,29 +1132,37 @@ impl ThreadView {
         let later = pending.later_checkpoints;
         let plural = if later == 1 { "turn" } else { "turns" };
         let restores_files = pending.has_own_checkpoint || later > 0;
-        let title = if restores_files { "Restore checkpoint & retry?" } else { "Retry with higher thinking?" };
-        let detail = match (pending.has_own_checkpoint, later) {
-            (true, 0) => format!(
-                "This restores files changed in this turn back to before your message, then retries with {} thinking. Restore is blocked if those files changed since.",
-                pending.effort_label,
-            ),
-            (true, n) => format!(
-                "This restores files changed in this turn and {n} later {plural} back to before your message, then retries with {} thinking. Restore is blocked if those files changed since.",
-                pending.effort_label,
-            ),
-            (false, 0) => format!(
-                "This switches thinking to {} and resends your message. No file checkpoints will be reverted.",
-                pending.effort_label,
-            ),
-            (false, n) => format!(
-                "This restores files changed in {n} later {plural} back to before your message, then retries with {} thinking. Restore is blocked if those files changed since.",
-                pending.effort_label,
-            ),
+        let scope = match (pending.has_own_checkpoint, later) {
+            (true, 0) => "files changed in this turn".to_string(),
+            (true, n) => format!("files changed in this turn and {n} later {plural}"),
+            (false, n) => format!("files changed in {n} later {plural}"),
         };
-        let confirm_label = if restores_files {
-            format!("Restore & retry ({})", pending.effort_label)
-        } else {
-            format!("Retry ({})", pending.effort_label)
+        let (title, detail, confirm_label) = match &pending.kind {
+            TurnActionKind::RetryHigherThinking { effort_label, .. } => {
+                let title = if restores_files { "Restore checkpoint & retry?" } else { "Retry with higher thinking?" };
+                let detail = if restores_files {
+                    format!("This restores {scope} back to before your message, then retries with {effort_label} thinking. Restore is blocked if those files changed since.")
+                } else {
+                    format!("This switches thinking to {effort_label} and resends your message. No file checkpoints will be reverted.")
+                };
+                let label = if restores_files { format!("Restore & retry ({effort_label})") } else { format!("Retry ({effort_label})") };
+                (title, detail, label)
+            }
+            TurnActionKind::EditRewind { .. } => (
+                "Restore checkpoint & edit message?",
+                format!("This restores {scope} back to before your message and loads your prompt into the composer to edit. Restore is blocked if those files changed since."),
+                "Restore & edit".to_string(),
+            ),
+            TurnActionKind::RetryWithModel { target, .. } => (
+                "Restore checkpoint & retry with model?",
+                format!("This restores {scope} back to before your message, then retries using {}. Restore is blocked if those files changed since.", target.name),
+                format!("Restore & retry ({})", target.name),
+            ),
+            TurnActionKind::RestoreOnly => (
+                "Restore files to checkpoint?",
+                format!("This restores {scope} back to before your message without resending anything. Restore is blocked if those files changed since."),
+                "Restore files".to_string(),
+            ),
         };
         let (confirm_bg, confirm_hover) = if restores_files {
             (theme().destructive, theme().destructive.opacity(0.8))
@@ -832,6 +1221,118 @@ impl ThreadView {
                                     )
                                     .debug_selector(|| "retry-confirm".into())
                                     .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.confirm_retry_turn(window, cx))),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_retry_model_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.retry_model_picker.as_ref()?;
+        let row = picker.row;
+        let models = self.other_models_for_retry();
+        let clear = cx.entity().downgrade();
+        let has_checkpoints = !self.retry_checkpoints_for(row).is_empty();
+        let subtitle = if has_checkpoints {
+            "Pick a model to retry this message with. You'll confirm checkpoint restore next."
+        } else {
+            "Pick a model to retry this message with."
+        };
+        let rows: Vec<_> = models.into_iter().enumerate().map(|(ix, model)| {
+            let target = model.clone();
+            let harness_name = model.harness.name();
+            let same_harness = model.harness == self.harness;
+            div()
+                .id(SharedString::from(format!("retry-model-opt-{ix}")))
+                .w_full()
+                .px(px(10.0))
+                .py(px(7.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme().secondary_hover))
+                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                    v.select_retry_model(row, target.clone(), window, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .min_w_0()
+                        .child(logos::draw(logos::for_harness(model.harness), 13.0, theme().muted_foreground))
+                        .child(
+                            div()
+                                .text_size(scale::px(13.0))
+                                .text_color(theme().foreground)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(model.name),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(6.0))
+                        .py(px(1.5))
+                        .rounded(px(4.0))
+                        .bg(theme().muted)
+                        .text_size(scale::px(10.5))
+                        .text_color(theme().muted_foreground)
+                        .child(if same_harness { harness_name.to_string() } else { format!("{harness_name} · handoff") }),
+                )
+        }).collect();
+        Some(
+            AlertDialog::new(cx)
+                .focus_handle(self.restore_focus.clone())
+                .on_open_change(move |open, _, window, cx| {
+                    if !open {
+                        let _ = clear.update(cx, |v, cx| v.close_retry_model_picker(window, cx));
+                    }
+                })
+                .backdrop(div().absolute().inset_0().bg(theme().backdrop))
+                .popup(
+                    AlertDialogPopup::new()
+                        .w(px(420.0))
+                        .max_w_full()
+                        .p(px(18.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .rounded(px(10.0))
+                        .bg(theme().background)
+                        .border_1()
+                        .border_color(theme().panel_border)
+                        .child(
+                            AlertDialogTitle::new()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(scale::px(15.5))
+                                .child("Retry with another model"),
+                        )
+                        .child(AlertDialogDescription::new().text_color(theme().muted_foreground).child(subtitle))
+                        .child(
+                            div()
+                                .id("retry-model-list")
+                                .max_h(px(280.0))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .pt(px(4.0))
+                                .child(
+                                    btn::text("retry-model-cancel", "Cancel", false)
+                                        .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.close_retry_model_picker(window, cx))),
                                 ),
                         ),
                 )
@@ -904,6 +1405,30 @@ mod tests {
         assert_eq!(retried, "> Please revisit and retry this earlier request:\n\nOriginal request");
         assert_eq!(strip_retry_prefixes(&retried), "Original request");
         assert_eq!(strip_retry_prefixes(&format!("{RETRY_EARLIER_PREFIX}\n\nOriginal request")), "Original request");
+    }
+
+    #[test]
+    fn turn_end_for_row_stops_at_next_visible_user_entry() {
+        let entries = vec![
+            Entry::User("first".into()),
+            Entry::Agent("reply 1".into()),
+            Entry::notice("Restored files to checkpoint", false),
+            Entry::User("second".into()),
+            Entry::Agent("reply 2".into()),
+        ];
+        assert_eq!(turn_end_for_row(&entries, 0), 3);
+        assert_eq!(turn_end_for_row(&entries, 3), 5);
+    }
+
+    #[test]
+    fn resent_with_model_notice_formats_and_round_trips() {
+        let _dirs = crate::datadir::use_throwaway_folders();
+        let mut map = BTreeMap::new();
+        map.insert(0, UserNotice::ResentWithModel { model: "Opus 5.5".into() });
+        assert_eq!(map[&0].text(), "Resent with Opus 5.5");
+        save_notices("user-model-notice-test", &map);
+        assert_eq!(load_notices("user-model-notice-test"), map);
+        clear_notices("user-model-notice-test");
     }
 
     #[test]

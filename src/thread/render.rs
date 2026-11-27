@@ -37,6 +37,10 @@ pub(super) const COLUMN_MAX_W: f32 = 840.0;
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(draft) = self.pending_edit_draft.take() {
+            self.set_draft(&draft, window, cx);
+            self.focus_composer(window, cx);
+        }
         let root = div()
             .relative()
             .size_full()
@@ -48,7 +52,7 @@ impl Render for ThreadView {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseDownEvent, window, cx| {
-                    if v.picker.is_none() && v.review.is_none() && v.retry_confirm.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
+                    if v.picker.is_none() && v.review.is_none() && v.retry_confirm.is_none() && v.retry_model_picker.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
                         v.focus_composer(window, cx);
                     }
                 }),
@@ -56,7 +60,7 @@ impl Render for ThreadView {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseUpEvent, window, cx| {
-                    if v.picker.is_none() && v.review.is_none() && v.retry_confirm.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() && v.comment_anchor.is_none() {
+                    if v.picker.is_none() && v.review.is_none() && v.retry_confirm.is_none() && v.retry_model_picker.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() && v.comment_anchor.is_none() {
                         v.focus_composer(window, cx);
                     }
                 }),
@@ -115,7 +119,7 @@ impl Render for ThreadView {
                         v.comment_anchor = (!quote.is_empty()).then_some((anchor, quote));
                     }
                     if v.picker != Some(ThreadPicker::Model)
-                        && v.review.is_none() && v.retry_confirm.is_none() && v.find.is_none()
+                        && v.review.is_none() && v.retry_confirm.is_none() && v.retry_model_picker.is_none() && v.find.is_none()
                         && v.selection_comment.is_none() && v.comment_anchor.is_none()
                     {
                         v.focus_composer(window, cx);
@@ -155,6 +159,7 @@ impl Render for ThreadView {
             .children(self.render_chat_menu(window, cx))
             .children(self.render_picker_overlay(window, cx))
             .children(self.render_retry_confirm(cx))
+            .children(self.render_retry_model_picker(cx))
             .children(self.render_screenshot(cx))
     }
 }
@@ -470,7 +475,15 @@ impl ThreadView {
                 if self.inline_visuals {
                     view = crate::visual::ui::transcript(view, Scope { call: format!("entry-{ix}"), row: Some(ix), ui: self.card_ui.clone() });
                 }
-                div().px(px(2.0)).flex().flex_col().gap(px(6.0)).child(view).children(citations).into_any_element()
+                div()
+                    .px(px(2.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(view)
+                    .children(citations)
+                    .children(self.render_agent_footer(ix, cx))
+                    .into_any_element()
             }
             Entry::WorkspaceBoundary(_) => return div().into_any_element(),
             Entry::Thought(text) => {
