@@ -223,7 +223,7 @@ impl Settings {
             None => self.claude_subagents,
             Some(agent) => {
                 let choice = self.custom_subagents.get(agent);
-                crate::harness::SubagentAccess { on: choice.on, edits: choice.edits }
+                crate::harness::SubagentAccess { on: choice.on, edits: choice.edits, cross_harness: choice.cross_harness }
             }
         }
     }

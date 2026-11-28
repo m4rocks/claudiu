@@ -58,6 +58,9 @@ pub struct Provider {
     pub missing: &'static str,
     /// A risk the settings page shows before the agent is switched on, such as a sign-in its maker's terms forbid here.
     pub warning: Option<&'static str>,
+    /// Where "Allow cross-harness subagents" starts, before the user changes it. Kept here rather than in the
+    /// adapter's capabilities so a build without the adapter still saves the right default.
+    pub cross_harness_default: bool,
     /// Arguments after `args` for one task's server, made ready here.
     pub task_args: fn(&super::runner::Request) -> Result<Vec<String>, String>,
     /// The environment the server starts with, for agents that take the model, effort and edits that way.
@@ -159,6 +162,8 @@ pub struct AgentChoice {
     pub edits: bool,
     /// The models the agent offered when the page last asked, shown while it asks again.
     pub catalog: Vec<AgentModel>,
+    /// "Allow cross-harness subagents" (`SubagentAccess::cross_harness`).
+    pub cross_harness: bool,
 }
 
 /// Keeps the flat provider keys used by existing state files.
@@ -169,7 +174,8 @@ impl Default for CustomSubagents {
     fn default() -> Self {
         Self(AgentMap::from_fn(|agent| {
             let enabled = agent != Agent::Antigravity;
-            AgentChoice { on: enabled, edits: enabled, ..Default::default() }
+            let cross_harness = agent.provider().cross_harness_default;
+            AgentChoice { on: enabled, edits: enabled, cross_harness, ..Default::default() }
         }))
     }
 }
@@ -184,6 +190,7 @@ impl Serialize for CustomSubagents {
             stored.insert(format!("{key}_models"), json!(choice.models));
             stored.insert(format!("{key}_edits"), json!(choice.edits));
             stored.insert(format!("{key}_catalog"), json!(choice.catalog));
+            stored.insert(format!("{key}_cross_harness"), json!(choice.cross_harness));
         }
         stored.serialize(serializer)
     }
@@ -204,6 +211,7 @@ impl<'de> Deserialize<'de> for CustomSubagents {
                 models: field::<_, D::Error>(&mut stored, &format!("{key}_models"), vec![])?,
                 edits: field::<_, D::Error>(&mut stored, &format!("{key}_edits"), defaults.edits)?,
                 catalog: field::<_, D::Error>(&mut stored, &format!("{key}_catalog"), vec![])?,
+                cross_harness: field::<_, D::Error>(&mut stored, &format!("{key}_cross_harness"), defaults.cross_harness)?,
             };
         }
         Ok(result)
@@ -365,7 +373,7 @@ mod tests {
     }
 
     fn on(models: &[&str], edits: bool) -> AgentChoice {
-        AgentChoice { on: true, models: ids(models), edits, catalog: vec![] }
+        AgentChoice { on: true, models: ids(models), edits, catalog: vec![], cross_harness: true }
     }
 
     #[test]
@@ -471,7 +479,7 @@ mod tests {
         let loaded: CustomSubagents = serde_json::from_str(saved).unwrap();
         assert_eq!(
             loaded,
-            choices(AgentChoice { on: true, models: ids(&["gpt-6.1-sol"]), edits: true, catalog: vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }] }, CustomSubagents::default().get(Agent::OpenCode).clone())
+            choices(AgentChoice { on: true, models: ids(&["gpt-6.1-sol"]), edits: true, catalog: vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }], cross_harness: true }, CustomSubagents::default().get(Agent::OpenCode).clone())
         );
         let again: CustomSubagents = serde_json::from_str(&serde_json::to_string(&loaded).unwrap()).unwrap();
         assert_eq!(again, loaded);

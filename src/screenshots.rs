@@ -25,9 +25,9 @@ fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
     let session_scenario = matches!(scenario.as_str(), "session" | "session-short" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "review" | "review-hover");
     let shortcut = match scenario.as_str() {
-        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-short" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "harnesses" | "review" | "review-hover" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-short" | "session-done" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "harnesses" | "harness-dialog" | "review" | "review-hover" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-short, session-done, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-short, session-done, session-no-compact, session-scrolled, toast, harnesses, harness-dialog, review or review-hover"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -186,10 +186,14 @@ fn capture() -> Result<()> {
         }))?;
         cx.run_until_parked();
     }
-    if scenario == "harnesses" {
+    if scenario == "harnesses" || scenario == "harness-dialog" {
         cx.update_window(window, |_, window, app| workspace.update(app, |ws, cx| {
             ws.act(crate::app::Act::OpenSettings, window, cx);
             ws.settings_page = crate::app::SettingsPage::Harnesses;
+            // Antigravity's popup: its subagent switches, which start off, and the terms warning.
+            if scenario == "harness-dialog" {
+                ws.open_harness_dialog(crate::harness::Harness::Antigravity, window, cx);
+            }
         }))?;
         cx.run_until_parked();
     }

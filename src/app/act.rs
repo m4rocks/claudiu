@@ -364,7 +364,7 @@ impl Workspace {
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 let custom = &self.store.data.settings.custom_subagents;
-                let form = |c: &harness::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
+                let form = |c: &harness::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits, cross_harness: c.cross_harness };
                 let subagents = Box::new(HarnessesForm {
                     enabled: self.store.data.settings.enabled_harnesses_list(),
                     agents: harness::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))),

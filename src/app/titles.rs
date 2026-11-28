@@ -13,6 +13,17 @@ impl Workspace {
         chosen.harness.adapter().capabilities.text_generation.allowed().then_some(chosen)
     }
 
+    /// A saved text generation model whose adapter now refuses m4code's prompts goes back to the local summary. The
+    /// toast shows once, since the change is saved.
+    pub(super) fn drop_refused_text_generation(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = self.store.data.settings.text_generation_model.as_ref().filter(|model| model.harness.is_registered()) else { return };
+        let Some(refusal) = model.harness.adapter().capabilities.text_generation.refusal() else { return };
+        let name = model.harness.name();
+        self.store.data.settings.text_generation_model = None;
+        self.store.mark_dirty();
+        self.toast(format!("{refusal} Titles, commit messages and summaries now use the local summary instead of {name}."), cx);
+    }
+
     pub(super) fn text_generator(&self, cx: &App) -> Result<Option<TextGenerator>, String> {
         let settings = &self.store.data.settings;
         let Some(model) = settings.text_generation_model.clone() else { return Ok(None) };

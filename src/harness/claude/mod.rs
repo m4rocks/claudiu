@@ -87,7 +87,7 @@ pub const ADAPTER: Adapter = Adapter {
             let exe = exe.ok_or("Could not find the `claude` CLI on PATH.")?;
             Ok(vec![super::limits::Pool { name: "Claude Code".into(), usage: limits::read(exe)? }])
         },
-        every: limits::REFRESH_EVERY,
+        every: Some(limits::REFRESH_EVERY),
         after_turn: true,
         live: None,
     }),
@@ -101,6 +101,7 @@ pub const ADAPTER: Adapter = Adapter {
     probe_session_meta: Some(|| serde_json::json!({ "claudeCode": { "options": { "persistSession": false } } })),
     copies_skills: false,
     capabilities: super::capabilities::Capabilities::ALL,
+    mcp_off: &[],
     reports: Some(|| usage::read_snapshots(&usage::snapshot_dir())),
     native_sessions: Some(super::NativeSessions {
         statuses: native_statuses,
@@ -236,7 +237,7 @@ pub fn prepare_session(
         env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
         // The mod registers the agent types and answers their turns, so they go only where it loads.
         let targets: Vec<_> = settings.enabled_harnesses_list().into_iter()
-            .filter(|h| super::capabilities::subagent(super::Harness::Claude, *h).allowed()).collect();
+            .filter(|h| super::capabilities::subagent(settings, super::Harness::Claude, *h).allowed()).collect();
         if let Some(subagents) = settings.custom_subagents.env_for_edits(&targets, allow_subagent_edits)
             && let Ok(exe) = crate::platform::own_exe()
         {

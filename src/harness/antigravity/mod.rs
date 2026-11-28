@@ -1,8 +1,6 @@
 //! Google Antigravity, which speaks ACP itself (`agy acp`). It resumes a session without replaying it, as T3 Code
 //! found, so an old Antigravity conversation opens empty and carries on from where it was.
 
-// Unused while usage polling is paused (see `ANTIGRAVITY` in `harness::subagents`); its tests still run.
-#[allow(dead_code)]
 pub mod limits;
 pub mod read_only;
 
@@ -16,6 +14,30 @@ use super::subagents::Agent;
 use super::{Adapter, Reopen};
 #[cfg(feature = "adapter-antigravity")]
 use self::background::{background_update, task_finished};
+
+/// Section 6 of Google's Antigravity terms (https://antigravity.google/terms) and Google's answers on the AI Developers
+/// Forum: a client may host Antigravity while the user types the prompts and Antigravity keeps its own system
+/// prompt, tools and history. So m4code doesn't seed it with another conversation, send it prompts of its own, or
+/// move a conversation without the user asking.
+#[cfg(feature = "adapter-antigravity")]
+const CAPABILITIES: super::capabilities::Capabilities = {
+    use super::capabilities::{Capability::{Allowed, Refused}, Handoff};
+    const REPLAY: &str = "Google's Antigravity terms don't allow seeding a new Antigravity session with an earlier conversation.";
+    super::capabilities::Capabilities {
+        rewind: Refused(REPLAY),
+        fork: Refused(REPLAY),
+        continue_fresh: Allowed,
+        compaction_fallback: Refused("Antigravity compacts only with its own /compact, and it doesn't list one in this session."),
+        text_generation: Refused(TEXT_GENERATION_REFUSED),
+        handoff_in: Handoff::Never("Google's Antigravity terms don't allow moving another model's conversation onto Antigravity."),
+        handoff_out: Handoff::UserOnly("Only you can move an Antigravity conversation to another model."),
+        subagent: Allowed,
+        spawns_subagents: Allowed,
+    }
+};
+
+#[cfg(feature = "adapter-antigravity")]
+const TEXT_GENERATION_REFUSED: &str = "Google's Antigravity terms don't allow m4code's own prompts, such as titles, commit messages and summaries.";
 
 #[cfg(feature = "adapter-antigravity")]
 pub const ADAPTER: Adapter = Adapter {
@@ -47,7 +69,8 @@ pub const ADAPTER: Adapter = Adapter {
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".gemini").join("config"),
     project_skills: ".agents/skills",
-    hidden_commands: &["swarm", "teamwork", "grill-me", "browser", "goal", "schedule", "learn", "boost"],
+    // `/swarm` and `/teamwork` stay: they are how Google points multi-agent work on personal plans.
+    hidden_commands: &["grill-me", "browser", "goal", "schedule", "learn", "boost"],
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks {
         background: Some(super::BackgroundHooks { from_update: background_update, finished: task_finished, live_execute_tools: true }),
@@ -60,25 +83,27 @@ pub const ADAPTER: Adapter = Adapter {
         session_hint: "Run `agy` and sign in, then retry the session.",
         run_hint: "Antigravity isn't signed in. Run `agy` and sign in, then try again.",
     },
-    // Off pending clarification of Google's terms for usage polling. Back on, it reads:
-    // usage: Some(super::UsageSource {
-    //     read: |_| limits::read(&super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?, &crate::datadir::data_dir()),
-    //     every: limits::REFRESH_EVERY,
-    //     after_turn: false,
-    //     live: None,
-    // }),
-    usage: None,
-    text_generation_launch: |launch, data| {
-        let folder = read_only::prepare_text_generation(data).map_err(|e| format!("Could not disable Antigravity tools: {e}"))?;
-        launch.args.extend(["--gemini-dir".into(), folder.to_string_lossy().into_owned()]);
-        Ok(serde_json::Value::Null)
-    },
+    // Google's terms allow running `/usage` when the user asks, not on a timer, so m4code reads it only on a refresh.
+    usage: Some(super::UsageSource {
+        read: |_| limits::read(&super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?, &crate::datadir::data_dir()),
+        every: None,
+        after_turn: false,
+        live: None,
+    }),
+    text_generation_launch: |_, _| Err(TEXT_GENERATION_REFUSED.into()),
     probe_session_meta: None,
     copies_skills: true,
-    capabilities: super::capabilities::Capabilities::ALL,
+    capabilities: CAPABILITIES,
+    // Google points multi-agent work on personal plans to `/swarm` and `/teamwork`, so the instructions don't steer
+    // Antigravity away from them. Starting a session with a prompt it wrote, or reading another session into its
+    // context, would make it the coordinating agent Google's terms rule out.
+    mcp_off: &[crate::mcp::PREFER_OWN_TOOLS, "start_code_session", "read_code_session"],
     reports: None,
     native_sessions: None,
-    tidy: || {},
+    // Text generation ran agy from this folder before Google's terms ruled it out.
+    tidy: || {
+        let _ = std::fs::remove_dir_all(crate::datadir::data_dir().join("antigravity-text-generation"));
+    },
 };
 
 #[cfg(feature = "adapter-antigravity")]
@@ -147,7 +172,8 @@ pub const PROVIDER: Provider = Provider {
     missing: "agy was not found. Antigravity subagents need the Antigravity CLI installed.",
     // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
     // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
-    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
+    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch these on at your own risk."),
+    cross_harness_default: false,
     task_args: super::runner::antigravity_args,
     environment: super::runner::no_env,
     config_options: super::runner::antigravity_options,

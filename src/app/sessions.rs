@@ -142,7 +142,7 @@ impl Workspace {
         let settings = &self.store.data.settings;
         let adapter = meta.harness.adapter();
         let mut plan = harness::SessionPlan {
-            off: mcp::tools_off(&settings.m4code_tools_off, &[]),
+            off: mcp::tools_off(&settings.m4code_tools_off, adapter.mcp_off),
             ..Default::default()
         };
         if !adapter.fallback_question {
@@ -177,7 +177,7 @@ impl Workspace {
         if let Some(parent) = &meta.parent_session {
             // A resumed or handed-off subagent asks again, as a new one does.
             let parent = self.store.session(parent).and_then(SessionRecord::harness);
-            if let Some(refusal) = harness::capabilities::subagent(parent, meta.harness).refusal() {
+            if let Some(refusal) = harness::capabilities::subagent(settings, parent, meta.harness).refusal() {
                 self.toast(refusal, cx);
                 return None;
             }
@@ -198,7 +198,7 @@ impl Workspace {
             return None;
         }
         let targets: Vec<_> = settings.enabled_harnesses_list().into_iter()
-            .filter(|h| settings.subagent_access(*h).on && harness::capabilities::subagent(meta.harness, *h).allowed())
+            .filter(|h| settings.subagent_access(*h).on && harness::capabilities::subagent(settings, meta.harness, *h).allowed())
             .map(Harness::key).collect();
         let project = self.store.project_for_cwd(cwd).and_then(|id| self.store.project(&id)).map(|p| p.path.as_path());
         let tools = match mcp::session::SessionTools::new(record_id, cwd, project, &plan.off, &targets) {
@@ -373,6 +373,8 @@ impl Workspace {
             self.store.mark_dirty();
         }
         let view = cx.new(|cx| ThreadView::new(start, window, cx));
+        let refusals = self.subagent_refusals(view.read(cx).harness);
+        view.update(cx, |v, _| v.subagent_refusals = refusals);
         if switching_harness {
             view.update(cx, |v, cx| v.hold_workspace_switch(true, cx));
         }

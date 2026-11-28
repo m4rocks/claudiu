@@ -103,6 +103,13 @@ impl Workspace {
 
     /// Check what the request needs. A new session's folder, or the worktree to switch to, is resolved into `req.args["folder"]`.
     fn prepare(&self, req: &mut Request, cx: &App) -> Result<(), String> {
+        // The tool isn't offered to such a session at all; this refuses a call that reaches m4code anyway.
+        let asking = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
+        if let Some(harness) = self.store.session(asking).and_then(SessionRecord::harness)
+            && harness.adapter().mcp_off.contains(&req.tool.as_str())
+        {
+            return Err(format!("{} sessions can't use {}.", harness.name(), req.tool));
+        }
         if req.tool == "switch_worktree" {
             return self.prepare_switch(req);
         }
@@ -305,6 +312,12 @@ impl Workspace {
             "start_code_session" => {
                 let cwd = folder.ok_or("No folder.")?;
                 let harness = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::registered().find(|h| h.key() == key)).unwrap_or_else(|| self.store.data.settings.default_model().harness);
+                let asking = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
+                if let Some(from) = self.store.session(asking).and_then(SessionRecord::harness)
+                    && let Some(refusal) = crate::harness::capabilities::crossing(&self.store.data.settings, from, harness).refusal()
+                {
+                    return Err(refusal.into());
+                }
                 // The model may pick the model and effort; the permission mode stays the user's default for new
                 // sessions (`Starter::OtherSession` never starts with full access).
                 let mut options = vec![];
@@ -349,7 +362,9 @@ impl Workspace {
                 match model {
                     Some(model) if req.args["cross"].as_bool() == Some(true) => {
                         let from = thread.read(cx).harness;
-                        if let Some(refusal) = crate::harness::capabilities::handoff(from, model.harness, crate::harness::capabilities::Initiator::Automatic).refusal() {
+                        let handoff = crate::harness::capabilities::handoff(from, model.harness, crate::harness::capabilities::Initiator::Automatic);
+                        let crossing = crate::harness::capabilities::crossing(&self.store.data.settings, from, model.harness);
+                        if let Some(refusal) = handoff.refusal().or(crossing.refusal()) {
                             return Err(refusal.into());
                         }
                         let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);

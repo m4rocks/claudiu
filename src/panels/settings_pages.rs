@@ -109,6 +109,13 @@ fn flip_harness_enabled(ws: &mut Workspace, harness: Harness, cx: &mut Context<W
 }
 
 /// Flips an agent's "Allow use as subagents" switch inside its harness popup.
+fn flip_cross_harness(ws: &mut Workspace, harness: Harness) {
+    let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() else { return };
+    let mut access = subagents.access(harness);
+    access.cross_harness = !access.cross_harness;
+    subagents.set_access(harness, access);
+}
+
 fn flip_subagent(ws: &mut Workspace, harness: Harness, cx: &mut Context<Workspace>) {
     let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() else { return };
     let mut access = subagents.access(harness);
@@ -285,6 +292,14 @@ impl Workspace {
             move |ws, _, cx| flip_subagent(ws, harness, cx),
             cx,
         ).disabled(refusal.is_some()));
+        controls = controls.child(switch_row(
+            SharedString::from(format!("agent-dialog-{key}-cross-harness")),
+            "Allow cross-harness subagents",
+            Some("Run as a subagent of other harnesses, and start subagents on them".into()),
+            access.cross_harness,
+            move |ws, _, _| flip_cross_harness(ws, harness),
+            cx,
+        ));
         if let Some(warning) = harness.agent().and_then(|agent| agent.provider().warning) {
             controls = controls.child(warn(warning));
         }
@@ -566,7 +581,7 @@ mod tests {
     fn harness_subtitles_use_the_same_subagent_status_for_every_provider() {
         let form = crate::app::HarnessesForm {
             enabled: Harness::ALL.to_vec(),
-            agents: crate::harness::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![] }),
+            agents: crate::harness::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![], cross_harness: true }),
             claude_models: vec![], claude_subagents: Default::default(), picking: None,
         };
         for harness in Harness::registered() {

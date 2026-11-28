@@ -92,8 +92,9 @@ fn feature_of(tool: &str) -> Option<&'static str> {
     }
 }
 
+/// Off as a whole feature, or by its own name for an adapter that turns off a single tool (`Adapter::mcp_off`).
 fn is_off(off: &[&str], tool: &str) -> bool {
-    feature_of(tool).is_some_and(|f| off.contains(&f))
+    off.contains(&tool) || feature_of(tool).is_some_and(|f| off.contains(&f))
 }
 
 /// Tools the model uses to tell m4code something about itself; none of them reads or starts another session.
@@ -174,6 +175,17 @@ const INTRO: &str = "You are running inside m4code, a desktop app that hosts thi
 Treat m4code as your environment: link workspace files in Markdown as `[name](relative/path#L10-L20)` so the user can jump straight to them in the editor, \
 prefer m4code's MCP tools over any provider-native swarm, workflow, or question tools, and never tell the user to run harness-specific CLI flags or slash commands such as `/swarm`, `/teamwork`, `/resume`, or `/login`.";
 
+/// The opening for an agent that keeps its own multi-agent commands (`PREFER_OWN_TOOLS` off): the same, without
+/// steering it away from them.
+const INTRO_KEEPING_NATIVE: &str = "You are running inside m4code, a desktop app that hosts this coding-agent session. \
+Treat m4code as your environment: link workspace files in Markdown as `[name](relative/path#L10-L20)` so the user can jump straight to them in the editor, \
+and never tell the user to run harness-specific CLI flags or slash commands such as `/resume` or `/login`.";
+
+/// An entry in a session's off list, not a tool: the instructions stop telling the agent to prefer m4code's tools over
+/// its own swarm and workflow commands. An adapter turns it off for an agent whose terms point multi-agent work to
+/// those commands.
+pub const PREFER_OWN_TOOLS: &str = "prefer_own_tools";
+
 /// Confirmation instructions shared by every provider before switching models.
 fn model_instructions() -> String {
     String::from(
@@ -187,7 +199,7 @@ switching to another one hands this conversation over. After set_model, end your
 /// The `initialize` reply's instructions: the opening, then the text of each feature that is not off.
 fn instructions(off: &[&str]) -> String {
     let on = |name: &str| !off.contains(&name);
-    let mut text = INTRO.to_string();
+    let mut text = if on(PREFER_OWN_TOOLS) { INTRO } else { INTRO_KEEPING_NATIVE }.to_string();
     if on("visual") {
         text += VISUAL_INSTRUCTIONS;
     }
@@ -203,6 +215,10 @@ fn instructions(off: &[&str]) -> String {
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
         text += SUBAGENT_INSTRUCTIONS;
+        let single: Vec<&str> = BRIDGE_TOOLS.iter().copied().filter(|tool| off.contains(tool)).collect();
+        if !single.is_empty() {
+            text += &format!(" This session doesn't have {}.", single.join(" or "));
+        }
     }
     if on("ask_user") {
         text += " To ask the user a multiple-choice question in m4code's UI, call ask_user with the question and options instead of any built-in question tool.";
@@ -1008,6 +1024,22 @@ mod tests {
         assert!(described(&[]).contains("never ask them to confirm a switch they asked for"));
         assert!(!described(&[]).contains("AskUserQuestion"));
         assert_eq!(described(&[]), described(&["ask_user_question"]));
+    }
+
+    #[test]
+    fn an_agent_keeping_its_own_swarm_commands_isnt_steered_away_from_them() {
+        assert!(instructions(&[]).contains("/swarm"));
+        let keeping = instructions(&[PREFER_OWN_TOOLS]);
+        assert!(!keeping.contains("swarm") && !keeping.contains("/teamwork"), "{keeping}");
+        assert!(keeping.contains("/login"), "the other advice stays");
+    }
+
+    #[test]
+    fn a_single_tool_turned_off_is_neither_offered_nor_promised() {
+        let off = ["start_code_session", "read_code_session"];
+        assert!(is_off(&off, "start_code_session") && is_off(&off, "read_code_session"));
+        assert!(!is_off(&off, "list_code_sessions"), "the rest of the feature stays");
+        assert!(instructions(&off).contains("This session doesn't have read_code_session or start_code_session."));
     }
 
     #[test]

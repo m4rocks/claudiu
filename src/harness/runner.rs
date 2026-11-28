@@ -179,17 +179,20 @@ fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, S
     if !harness.is_registered() {
         return Err(format!("{} is unavailable in this build.", harness.name()));
     }
-    // Claude Code's mod starts every task this helper runs.
-    super::capabilities::subagent(super::Harness::Claude, harness).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
+    // Claude Code's mod starts every task this helper runs. Its agent types were listed at launch, so the settings
+    // are read again here: a toggle switched off since then holds.
+    let settings = crate::store::Store::read_settings(&crate::store::Store::default_path());
+    super::capabilities::subagent(&settings, super::Harness::Claude, harness).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
     let provider = request.agent.provider();
     let args = (provider.task_args)(request)?;
     let mut plan = super::SessionPlan::default();
     plan.env.extend((provider.environment)(request).into_iter().map(|(key, value)| (key.into(), value)));
     // This child cannot represent itself as its parent's desktop thread. Give it the shared
     // workspace tool independently of tools that require a registered m4code thread.
-    let mut tools = crate::mcp::session::SessionTools::new("", &request.cwd, None, &["github", "sessions", "model", "ask_user", "visual"], &[])?;
-    tools.load_workspace();
     let adapter = harness.adapter();
+    let off: Vec<&str> = ["github", "sessions", "model", "ask_user", "visual"].into_iter().chain(adapter.mcp_off.iter().copied()).collect();
+    let mut tools = crate::mcp::session::SessionTools::new("", &request.cwd, None, &off, &[])?;
+    tools.load_workspace();
     (adapter.configure_mcp)(&tools, &mut plan)?;
     let env = plan.env.iter().map(|(key, value)| (key.as_str(), value.clone())).collect::<Vec<_>>();
     let connection = Connection::start(request.agent, &request.cwd, &args, &env)?;

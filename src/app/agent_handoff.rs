@@ -50,7 +50,11 @@ impl Workspace {
         let refusal = if !self.store.data.settings.harness_enabled(to) {
             Some(format!("{} is unavailable for this session.", to.name()))
         } else {
-            capabilities::handoff(thread.read(cx).harness, to, initiator).refusal().map(String::from)
+            let from = thread.read(cx).harness;
+            // An agent's switch checks "Allow cross-harness subagents" again here: either may have been turned off since
+            // `set_model` accepted it.
+            let crossing = if by_agent { capabilities::crossing(&self.store.data.settings, from, to) } else { capabilities::Capability::Allowed };
+            capabilities::handoff(from, to, initiator).refusal().or(crossing.refusal()).map(String::from)
         };
         if let Some(refusal) = refusal {
             if !by_agent {

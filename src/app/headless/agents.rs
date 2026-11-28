@@ -65,21 +65,21 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         assert!(ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, Some(Permission::Auto), window, cx));
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
-    let wait = |cx: &mut TestAppContext, harness| {
+    let wait = |cx: &mut TestAppContext, id: &str, harness| {
         let until = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             cx.run_until_parked();
             if ws.read_with(cx, |ws, app| {
-                ws.pending_handoffs.is_empty() && ws.live_view(&id).and_then(|v| v.thread()).is_some_and(|view| {
+                ws.pending_handoffs.is_empty() && ws.live_view(id).and_then(|v| v.thread()).is_some_and(|view| {
                     let view = view.read(app);
                     view.harness == harness && !view.is_loading() && !view.is_working() && view.thread.entries.iter().any(|e| matches!(e, Entry::Agent(text) if text == "ok"))
                 })
             }) { break; }
             if std::time::Instant::now() >= until {
                 ws.read_with(cx, |ws, app| {
-                    let view = ws.live_view(&id).and_then(SessionView::thread).map(|view| view.read(app));
+                    let view = ws.live_view(id).and_then(SessionView::thread).map(|view| view.read(app));
                     panic!("handoff to {harness:?} never settled: pending={}, view={:?}, toast={:?}",
-                        ws.pending_handoffs.contains_key(&id),
+                        ws.pending_handoffs.contains_key(id),
                         view.map(|view| (view.harness, view.is_loading(), view.is_working(), view.start_error(), &view.thread.entries)),
                         ws.toast.as_ref().map(|toast| &toast.text));
                 });
@@ -87,7 +87,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
             std::thread::yield_now();
         }
     };
-    wait(&mut cx, Harness::Claude);
+    wait(&mut cx, &id, Harness::Claude);
     for (harness, message, expected) in [
         (Harness::OpenCode, "continue on B", Permission::FullAccess),
         (Harness::Claude, "continue on A", Permission::Auto),
@@ -99,7 +99,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
         let mut visual = VisualTestContext::from_window(window, &cx);
         assert!(visual.debug_bounds("thread-mode").is_some(), "the permission chip stays visible through the handoff");
-        wait(&mut cx, harness);
+        wait(&mut cx, &id, harness);
         ws.read_with(&cx, |ws, app| {
             let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
             assert_eq!(view.permission(), Some(expected));
@@ -144,7 +144,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         ws.acp_server = Some(failed_server.clone());
         ws.dynamic_handoff(&id, Harness::Codex, None, "keep this draft".into(), false, None, window, cx);
     });
-    wait(&mut cx, Harness::Claude);
+    wait(&mut cx, &id, Harness::Claude);
     ws.read_with(&cx, |ws, app| {
         assert_eq!(ws.store.session(&id).unwrap().agent.as_ref().unwrap().harness, Harness::Claude);
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -154,30 +154,43 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
             Entry::Notice { text, error: true, .. } if text.contains("handshake failed"))).count(), 1);
         assert!(view.thread.active_notice(crate::harness::thread::NoticeKind::Handoff).is_none());
     });
+    // Antigravity takes no conversation from another model (Google's terms), so the session stays on Claude Code.
     step(&mut cx, &|ws, window, cx| {
         ws.acp_server = Some(server_for("antigravity"));
         ws.dynamic_handoff(&id, Harness::Antigravity, None, "continue on C".into(), false, None, window, cx);
     });
-    wait(&mut cx, Harness::Antigravity);
+    wait(&mut cx, &id, Harness::Claude);
+    ws.read_with(&cx, |ws, app| {
+        assert_eq!(ws.store.session(&id).unwrap().agent.as_ref().unwrap().harness, Harness::Claude);
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        assert!(view.thread.entries.iter().any(|entry| matches!(entry,
+            Entry::Notice { text, error: true, .. } if text.contains("Antigravity terms"))), "the refusal says why");
+    });
+    // A session that starts on Antigravity relaunches it for a permission change and keeps its provider session.
+    step(&mut cx, &|ws, window, cx| {
+        assert!(ws.new_session_from_home(Harness::Antigravity, None, work.path().to_path_buf(), Some("continue on C".into()), None, Some(Permission::Auto), window, cx));
+    });
+    let antigravity = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    wait(&mut cx, &antigravity, Harness::Antigravity);
     for permission in [Permission::FullAccess, Permission::ReadOnly] {
         step(&mut cx, &|ws, _, cx| {
-            let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+            let view = ws.live_view(&antigravity).unwrap().thread().unwrap().clone();
             view.update(cx, |view, cx| view.set_permission(permission, cx));
         });
-        wait(&mut cx, Harness::Antigravity);
+        wait(&mut cx, &antigravity, Harness::Antigravity);
         step(&mut cx, &|ws, window, cx| {
-            let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
+            let meta = ws.store.session(&antigravity).unwrap().agent.as_ref().unwrap();
             assert_eq!(meta.session_id, "fake-session");
             assert_eq!(meta.launched_full_access, permission == Permission::FullAccess);
-            let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+            let view = ws.live_view(&antigravity).unwrap().thread().unwrap().clone();
             assert_eq!(view.read(cx).permission(), Some(permission));
-            assert_eq!(view.read(cx).draft(cx), "keep this draft");
             view.update(cx, |view, cx| view.send("check permission".into(), window, cx));
         });
-        wait(&mut cx, Harness::Antigravity);
+        wait(&mut cx, &antigravity, Harness::Antigravity);
     }
     let permissions = std::fs::read_to_string(work.path().join("fake_agent.py.permissions")).unwrap();
     assert!(permissions.ends_with("antigravity:auto:False\nantigravity:default:True\nantigravity:plan:False\n"));
+    step(&mut cx, &|ws, window, cx| ws.end_live(&antigravity, window, cx));
     step(&mut cx, &|ws, window, cx| ws.end_live(&id, window, cx));
 }
 

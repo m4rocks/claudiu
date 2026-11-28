@@ -1006,7 +1006,8 @@ impl Workspace {
                         ));
                     }
                 }
-                None if state.loading || state.error.is_some() => {
+                // An adapter read only on request shows its row empty until the user refreshes.
+                None if state.loading || state.error.is_some() || harness.adapter().usage.as_ref().is_some_and(|usage| usage.every.is_none()) => {
                     if !rows.is_empty() {
                         rows.push(divider());
                     }

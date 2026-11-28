@@ -1,6 +1,6 @@
 //! Antigravity's 5-hour and weekly limits, from the CLI's own `agy -p /usage --output-format json`. Since agy 1.1.11
 //! the CLI answers `/usage` itself, without a model turn, so a reading costs no tokens; it does ask Google's servers,
-//! so the sidebar asks only every few minutes (`REFRESH_EVERY`). The JSON is agy's own and undocumented, so anything
+//! and Google's terms allow it on request but not on a timer, so m4code asks only when the user refreshes. The JSON is agy's own and undocumented, so anything
 //! that doesn't parse leaves the last reading in the sidebar.
 //!
 //! Antigravity splits its models into groups ("Gemini Models", "Claude and GPT models"), each with its own limits, so a
@@ -18,11 +18,9 @@ use serde_json::Value;
 use crate::store::{RateLimit, UsageLimits};
 use crate::harness::limits::Pool;
 
-/// Cache `agy --version` per executable path so periodic `/usage` polls don't spawn an extra process.
+/// Cache `agy --version` per executable path so each `/usage` refresh doesn't spawn an extra process.
 static VERSION_OK: LazyLock<Mutex<HashMap<PathBuf, Result<(), String>>>> = LazyLock::new(Default::default);
 
-/// How often the sidebar asks again while Antigravity subagents are on.
-pub const REFRESH_EVERY: Duration = Duration::from_secs(300);
 /// `/usage` answers in well under a second; a CLI that hangs (an update, a sign-in prompt) is stopped.
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// More than any reading needs, so a runaway child can't fill memory.

@@ -374,6 +374,9 @@ pub struct ThreadView {
     pub all_models: Vec<CatalogModel>,
     /// The models of this session's harness ticked in Settings → Harnesses; they narrow the live model list too.
     pub picked: Vec<String>,
+    /// Why this session may not start a subagent on each harness (`capabilities::subagent`), kept current by the
+    /// workspace.
+    pub subagent_refusals: crate::harness::HarnessMap<Option<&'static str>>,
     /// The branch chip, when the session's folder is in a git repository.
     pub git: Option<GitChip>,
     /// Running child subagents / workspace background tasks attached to this session.
@@ -663,6 +666,7 @@ impl ThreadView {
             harness: start.harness,
             all_models: start.all_models.clone(),
             picked: start.picked.clone(),
+            subagent_refusals: Default::default(),
             git: None,
             background: vec![],
             provider_shells: vec![],
@@ -3613,7 +3617,9 @@ impl ThreadView {
         let cumulative_tokens = self.thread.cache_usage.input_tokens
             .saturating_add(self.thread.cache_usage.output_tokens)
             .max(self.thread.context.map(|(used, _)| used).unwrap_or(0));
+        // The nudge is a prompt of m4code's own, so it goes only to an agent that answers those.
         if notify_on_limit
+            && self.capabilities().text_generation.allowed()
             && self.is_working()
             && let Some(nudge) = self.runway.observe(usage, cumulative_tokens, auto_handoff, now)
         {

@@ -245,6 +245,7 @@ pub struct AgentForm {
     /// The ids of the models switched on.
     pub models: Vec<String>,
     pub edits: bool,
+    pub cross_harness: bool,
 }
 
 impl HarnessesForm {
@@ -253,7 +254,7 @@ impl HarnessesForm {
             None => self.claude_subagents,
             Some(agent) => {
                 let form = self.get(agent);
-                harness::SubagentAccess { on: form.on, edits: form.edits }
+                harness::SubagentAccess { on: form.on, edits: form.edits, cross_harness: form.cross_harness }
             }
         }
     }
@@ -265,6 +266,7 @@ impl HarnessesForm {
                 let form = self.get_mut(agent);
                 form.on = access.on;
                 form.edits = access.edits;
+                form.cross_harness = access.cross_harness;
             }
         }
     }
@@ -843,6 +845,7 @@ impl Workspace {
             ws.store.add_project(&path);
         }
         ws.discover_executables(cx);
+        ws.drop_refused_text_generation(cx);
         ws.refresh_git_async(cx);
         cx.background_executor().spawn(async { lifecycle::tidy_leftovers() }).detach();
         ws.ingest_usage(cx);

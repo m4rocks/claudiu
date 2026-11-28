@@ -89,11 +89,10 @@ impl Workspace {
         let now_instant = Instant::now();
         let now_unix = crate::store::now();
         for harness in Harness::registered() {
-            let Some(usage) = &harness.adapter().usage else { continue };
+            let Some(every) = harness.adapter().usage.as_ref().and_then(|usage| usage.every) else { continue };
             if !self.limits_harness_active(harness) {
                 continue;
             }
-            let every = usage.every;
             let state = self.limits_state.get(harness);
             if state.loading || state.authentication_required {
                 continue;
@@ -212,6 +211,7 @@ impl Workspace {
         let now = crate::store::now();
         let enabled = self.store.data.settings.enabled_harnesses_list();
         let all = self.store.data.settings.aggregated_models();
+        // `None` when nothing reports this harness's usage: unknown, not unused.
         let max_util = |h: Harness, model_id: Option<&str>| {
             self.usage_for_harness_model(h, model_id)
                 .and_then(|u| {
@@ -222,14 +222,13 @@ impl Workspace {
                         .filter_map(|l| l.utilization)
                         .reduce(f32::max)
                 })
-                .unwrap_or(0.0)
         };
         let may_take_over = |h: Harness| h != excluded && handoff(excluded, h, Initiator::Automatic).allowed();
         if let Some(pref) = &self.store.data.settings.auto_handoff_model
             && may_take_over(pref.harness)
             && enabled.contains(&pref.harness)
             && self.harness_probably_available(pref.harness)
-            && max_util(pref.harness, (!pref.id.is_empty()).then_some(pref.id.as_str())) < 0.95
+            && max_util(pref.harness, (!pref.id.is_empty()).then_some(pref.id.as_str())).is_none_or(|util| util < 0.95)
         {
             let name = all
                 .iter()
@@ -237,7 +236,7 @@ impl Workspace {
                 .map_or_else(|| pref.id.clone(), |m| m.name.clone());
             return Some(crate::harness::CatalogModel { harness: pref.harness, id: pref.id.clone(), name });
         }
-        let mut candidates: Vec<(f32, crate::harness::CatalogModel)> = enabled
+        let mut candidates: Vec<(Option<f32>, crate::harness::CatalogModel)> = enabled
             .into_iter()
             .filter(|&h| may_take_over(h) && self.harness_probably_available(h))
             .filter_map(|h| {
@@ -245,10 +244,11 @@ impl Workspace {
                     crate::harness::CatalogModel { harness: h, id: String::new(), name: h.name().into() }
                 });
                 let util = max_util(h, (!model.id.is_empty()).then_some(model.id.as_str()));
-                (util < 0.95).then_some((util, model))
+                util.is_none_or(|util| util < 0.95).then_some((util, model))
             })
             .collect();
-        candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // The least used first, and a harness whose usage is unknown after every one that is known.
+        candidates.sort_by(|a, b| a.0.is_none().cmp(&b.0.is_none()).then(a.0.unwrap_or(0.0).total_cmp(&b.0.unwrap_or(0.0))));
         candidates.into_iter().next().map(|(_, model)| model)
     }
 

@@ -676,6 +676,7 @@ impl ThreadView {
         let models = review_model_choices(&self.unified_models(), self.harness);
         let has_other_harness = models.iter().any(|m| m.harness != self.harness);
         let current_harness = self.harness;
+        let refusals = self.subagent_refusals.clone();
         Some(picker::model_dropdown_overlay(
             ("review-model-picker", "REVIEW WITH"),
             "review-model-list",
@@ -686,7 +687,7 @@ impl ThreadView {
             &self.picker_nav,
             models,
             move |h| (h == current_harness && has_other_harness).then_some("current"),
-            move |h| crate::harness::capabilities::subagent(current_harness, h).refusal(),
+            move |h| *refusals.get(h),
             |v, choice, _, cx| v.start_cross_model_review(choice, cx),
             |v, _, cx| v.close_review_model_picker(cx),
             window,
