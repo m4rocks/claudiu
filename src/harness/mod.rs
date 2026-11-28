@@ -41,11 +41,14 @@ pub enum Harness {
 pub struct SubagentAccess {
     pub on: bool,
     pub edits: bool,
+    /// "Allow cross-harness subagents": other harnesses may run this one as a subagent, and its sessions may start
+    /// other harnesses (`capabilities::crossing`).
+    pub cross_harness: bool,
 }
 
 impl Default for SubagentAccess {
     fn default() -> Self {
-        Self { on: true, edits: true }
+        Self { on: true, edits: true, cross_harness: true }
     }
 }
 
@@ -117,6 +120,8 @@ pub struct Adapter {
     pub copies_skills: bool,
     /// The actions the core may take with this agent (`capabilities.rs`).
     pub capabilities: capabilities::Capabilities,
+    /// Parts of m4code's MCP server its sessions and subagents never get, such as `mcp::PREFER_OWN_TOOLS`.
+    pub mcp_off: &'static [&'static str],
     /// Reads the figures its sessions report outside ACP, such as the files Claude Code's mod writes.
     pub reports: Option<fn() -> Vec<SessionReport>>,
     /// The agent's own record of its running sessions, for an agent that keeps one.
@@ -170,7 +175,9 @@ pub struct SessionReport {
 pub struct UsageSource {
     /// Asks the agent's CLI, given the executable set in Settings.
     pub read: fn(Option<&Path>) -> Result<Vec<limits::Pool>, String>,
-    pub every: std::time::Duration,
+    /// How often m4code asks on its own. `None` asks only when the user refreshes, for an agent whose terms allow a
+    /// reading on request but not on a timer.
+    pub every: Option<std::time::Duration>,
     /// Whether the end of a turn asks again.
     pub after_turn: bool,
     pub live: Option<LiveUsage>,
@@ -399,6 +406,7 @@ static UNAVAILABLE_ADAPTER: Adapter = Adapter {
     probe_session_meta: None,
     copies_skills: false,
     capabilities: capabilities::Capabilities::NONE,
+    mcp_off: &[],
     reports: None,
     native_sessions: None,
     tidy: || {},

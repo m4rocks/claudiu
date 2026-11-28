@@ -15,11 +15,17 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
 | **Claude Code** | `claude` CLI, Node, npm | Runs through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) (installed into m4code's data folder on first run) using whatever sign-in your `claude` has (subscription, API key, Bedrock, or Vertex). Disables `claude.ai`-only tools (scheduled tasks, push notifications, connectors) for m4code sessions only. Includes a Claude in Chrome toggle. |
 | **Codex** | Node, `codex login` | Runs through its ACP adapter from npm (downloaded on first run). |
 | **OpenCode** | `opencode` on `PATH` | Uses the providers configured in OpenCode. |
-| **Google Antigravity** | `agy` CLI, signed in | Opt-in for subagent use. |
+| **Google Antigravity** | `agy` CLI, signed in | Interactive only: see the terms note below. Opt-in for subagent use. |
 
 When upgrading from a version with multiple Claude accounts, resumed sessions use the login configured for the Claude CLI. Expired logins offer **Sign in** and **Retry session** in the conversation. Failed sessions retain their history and queued messages. A session that stops reporting progress offers Stop and Reconnect; reconnecting does not automatically repeat the last prompt.
 
-> **Antigravity terms note**: Google's [Antigravity terms](https://antigravity.google/terms) and [FAQ](https://antigravity.google/docs/faq) forbid using another company's agent (such as Claude Code) with a personal Google sign-in (Free, AI Plus, Pro, or Ultra), and Google can suspend or terminate accounts that do. Turn Antigravity subagents on at your own risk.
+> **Antigravity terms note**: Google's [Antigravity terms](https://antigravity.google/terms) and [FAQ](https://antigravity.google/docs/faq) forbid using another company's agent (such as Claude Code) with a personal Google sign-in (Free, AI Plus, Pro, or Ultra), and Google can suspend or terminate accounts that do. m4code keeps Antigravity to sessions you type in:
+>
+> - Rewind and fork are off in Antigravity sessions, and m4code doesn't compact one itself. Only Antigravity's own `/compact` runs, when Antigravity lists it.
+> - Conversations from other models can't be handed to Antigravity. You can hand an Antigravity conversation to another model yourself, but auto-handoff and an agent's `set_model` can't.
+> - Antigravity can't be the text generation model. A saved choice switches back to the local summary.
+> - **Allow subagent delegation** and **Allow cross-harness subagents** start off for Antigravity. Turn them on at your own risk.
+> - Antigravity's usage meter updates only when you press refresh.
 
 ## Features
 
@@ -57,13 +63,14 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
   - Right sidebar with cards for actions, the turn outline, session status, subagents, GitHub issues and pull requests, and linked sessions, plus inline visual cards agents draw in chat.
   - GitHub labels, assignees, edits, and comments update immediately while saving. Failed edits restore the previous content and retain the draft. If a comment posts but closing the item fails, retry close/reopen separately to avoid posting twice.
   - **Ask Agent** in the GitHub pane sends the request to the active agent if it is running in the repository. When it starts a new session, it uses the model selected in the Welcome composer.
-  - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code and Codex 5-hour/7-day limits). Usage dashboard links for OpenCode and Antigravity are shown only when their harnesses are enabled.
-  - Configurable text generation model (**Settings → General**) for automatic new-session titles, Regenerate title and Commit & Push—pick any enabled model or keep local summary.
+  - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code, Codex and Antigravity 5-hour/7-day limits). Antigravity's meter updates only when you press refresh. The usage dashboard link for OpenCode is shown only when its harness is enabled.
+  - Configurable text generation model (**Settings → General**) for automatic new-session titles, Regenerate title and Commit & Push—pick any enabled model except Antigravity, or keep local summary.
 
 ### Cross-agent subagents
 
 - **Shared MCP subagent tools**: Sessions across all harnesses share `spawn_subagent`, `list_subagents`, `send_subagent_message`, `wait_subagent`, and `stop_subagent` (targeting adapters enabled for subagent use in Settings). Children run in the parent's working folder without stealing focus, appear in the right sidebar, and fold their report back into the parent chat. Follow-ups reuse the child session, stopping a parent stops its children, and a read-only parent cannot grant edits. Sessions are conversations for the user and are created only when the user wants one. Subagents are workers the model uses to delegate work within its current session.
 - **Claude Code native subagents**: Claude Code can also start Codex, OpenCode, and (opt-in) Antigravity subagents directly. These plugin-run children receive the shared workspace context tool. Desktop-managed children have their own records and can use the session tools. Each streams its work in its own task view with configurable effort (`max` maps to Codex's `xhigh`; Antigravity caps at the model's highest thinking level) and supports live or queued follow-ups.
+- **Cross-harness subagents**: **Allow cross-harness subagents** (**Settings → Harnesses**) decides whether other harnesses can run a harness as a subagent and whether its sessions can start subagents or sessions on other harnesses, or move a conversation to them on their own, through `set_model` or auto-handoff. A subagent on another harness needs it on for both. It starts on for every harness except Antigravity.
 - **Edit permissions**: With **Allow edits** enabled, a subagent acts without Claude Code's permission rules. Read-only Antigravity runs in an isolated folder under m4code's data directory with a hook that permits only reading and searching (your personal Antigravity rules, skills, and MCP servers do not load there).
 
 ### Skills

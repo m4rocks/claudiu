@@ -160,6 +160,12 @@ impl Store {
     }
 
     /// Load tolerant of missing/corrupt files: a corrupt file is moved aside, never overwritten silently.
+    /// The settings in the state file at `path`, for another process that only reads them: nothing is moved or
+    /// migrated, and an unreadable file gives the defaults.
+    pub fn read_settings(path: &Path) -> Settings {
+        fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<Data>(&text).ok()).map(|data| data.settings).unwrap_or_default()
+    }
+
     pub fn load(path: PathBuf) -> Self {
         let mut data = Data { version: 1, layout: Layout { sidebar_visible: true, ..Default::default() }, ..Default::default() };
         if let Ok(text) = fs::read_to_string(&path) {

@@ -174,6 +174,17 @@ const INTRO: &str = "You are running inside m4code, a desktop app that hosts thi
 Treat m4code as your environment: link workspace files in Markdown as `[name](relative/path#L10-L20)` so the user can jump straight to them in the editor, \
 prefer m4code's MCP tools over any provider-native swarm, workflow, or question tools, and never tell the user to run harness-specific CLI flags or slash commands such as `/swarm`, `/teamwork`, `/resume`, or `/login`.";
 
+/// The opening for an agent that keeps its own multi-agent commands (`PREFER_OWN_TOOLS` off): the same, without
+/// steering it away from them.
+const INTRO_KEEPING_NATIVE: &str = "You are running inside m4code, a desktop app that hosts this coding-agent session. \
+Treat m4code as your environment: link workspace files in Markdown as `[name](relative/path#L10-L20)` so the user can jump straight to them in the editor, \
+and never tell the user to run harness-specific CLI flags or slash commands such as `/resume` or `/login`.";
+
+/// An entry in a session's off list, not a tool: the instructions stop telling the agent to prefer m4code's tools over
+/// its own swarm and workflow commands. An adapter turns it off for an agent whose terms point multi-agent work to
+/// those commands.
+pub const PREFER_OWN_TOOLS: &str = "prefer_own_tools";
+
 /// Confirmation instructions shared by every provider before switching models.
 fn model_instructions() -> String {
     String::from(
@@ -187,7 +198,7 @@ switching to another one hands this conversation over. After set_model, end your
 /// The `initialize` reply's instructions: the opening, then the text of each feature that is not off.
 fn instructions(off: &[&str]) -> String {
     let on = |name: &str| !off.contains(&name);
-    let mut text = INTRO.to_string();
+    let mut text = if on(PREFER_OWN_TOOLS) { INTRO } else { INTRO_KEEPING_NATIVE }.to_string();
     if on("visual") {
         text += VISUAL_INSTRUCTIONS;
     }
@@ -1008,6 +1019,14 @@ mod tests {
         assert!(described(&[]).contains("never ask them to confirm a switch they asked for"));
         assert!(!described(&[]).contains("AskUserQuestion"));
         assert_eq!(described(&[]), described(&["ask_user_question"]));
+    }
+
+    #[test]
+    fn an_agent_keeping_its_own_swarm_commands_isnt_steered_away_from_them() {
+        assert!(instructions(&[]).contains("/swarm"));
+        let keeping = instructions(&[PREFER_OWN_TOOLS]);
+        assert!(!keeping.contains("swarm") && !keeping.contains("/teamwork"), "{keeping}");
+        assert!(keeping.contains("/login"), "the other advice stays");
     }
 
     #[test]

@@ -212,14 +212,25 @@ impl Workspace {
         }
     }
 
-    /// Keep every open chat thread's aggregated model list up to date.
+    /// Why a session on `parent` may not start a subagent on each harness, for the pickers that offer one.
+    pub(crate) fn subagent_refusals(&self, parent: Harness) -> harness::HarnessMap<Option<&'static str>> {
+        let mut refusals = harness::HarnessMap::default();
+        for child in Harness::ALL {
+            *refusals.get_mut(child) = harness::capabilities::subagent(&self.store.data.settings, parent, child).refusal();
+        }
+        refusals
+    }
+
+    /// Keep every open chat thread's aggregated model list, and the subagents it may start, up to date.
     pub(crate) fn push_models_to_threads(&self, cx: &mut Context<Self>) {
         let settings = &self.store.data.settings;
         let models = settings.aggregated_models();
         for live in &self.live {
             if let Some(thread) = live.view.thread() {
+                let refusals = self.subagent_refusals(thread.read(cx).harness);
                 thread.update(cx, |t, cx| {
                     t.all_models = models.clone();
+                    t.subagent_refusals = refusals;
                     t.picked = settings.picked_models(t.harness).to_vec();
                     cx.notify();
                 });

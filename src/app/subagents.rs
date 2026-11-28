@@ -195,7 +195,7 @@ impl Workspace {
                 if !settings.harness_enabled(harness) || !access.on {
                     return Err(format!("{} subagents are disabled in Settings.", harness.name()));
                 }
-                crate::harness::capabilities::subagent(parent.harness(), harness).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
+                crate::harness::capabilities::subagent(settings, parent.harness(), harness).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
                 let parent_read_only = self.live_view(&parent.id).and_then(|view| view.thread()).is_some_and(|view| {
                     view.read(cx).permission() == Some(crate::harness::permission::Permission::ReadOnly)
                 });
@@ -251,6 +251,10 @@ impl Workspace {
             "wait_subagent" => self.subagent_status(req, cx).map(|status| status.to_string()),
             "send_subagent_message" => {
                 let record = self.owned_subagent(req)?;
+                // The settings may have changed since the subagent started.
+                if let Some(child) = record.harness() {
+                    crate::harness::capabilities::subagent(&self.store.data.settings, parent.harness(), child).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
+                }
                 let prompt = message(req)?;
                 if let Some(view) = self.live_view(&record.id).and_then(|v| v.thread()).cloned() {
                     view.update(cx, |v, cx| v.send(prompt, window, cx));
@@ -296,7 +300,7 @@ impl Workspace {
             self.toast(format!("{} is disabled in Settings.", model.harness.name()), cx);
             return;
         }
-        if let Some(refusal) = crate::harness::capabilities::subagent(parent.harness(), model.harness).refusal() {
+        if let Some(refusal) = crate::harness::capabilities::subagent(&self.store.data.settings, parent.harness(), model.harness).refusal() {
             self.toast(refusal, cx);
             return;
         }

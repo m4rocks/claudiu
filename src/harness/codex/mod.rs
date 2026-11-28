@@ -187,7 +187,7 @@ pub const ADAPTER: Adapter = Adapter {
     },
     usage: Some(super::UsageSource {
         read: |_| Ok(vec![Pool { name: "Codex".into(), usage: limits::probe()? }]),
-        every: limits::REFRESH_EVERY,
+        every: Some(limits::REFRESH_EVERY),
         after_turn: true,
         // Rollout logs are read again only after Codex writes to them: no network and no subprocess.
         live: Some(super::LiveUsage {
@@ -199,6 +199,7 @@ pub const ADAPTER: Adapter = Adapter {
     probe_session_meta: None,
     copies_skills: false,
     capabilities: super::capabilities::Capabilities::ALL,
+    mcp_off: &[],
     reports: None,
     native_sessions: None,
     tidy: || {},
@@ -376,6 +377,7 @@ pub const PROVIDER: Provider = Provider {
     server: "codex-acp",
     missing: "npx was not found on PATH. Codex subagents need Node.js.",
     warning: None,
+    cross_harness_default: true,
     task_args: super::runner::no_args,
     environment: super::runner::codex_env,
     config_options: super::runner::no_options,

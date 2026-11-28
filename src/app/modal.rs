@@ -286,7 +286,7 @@ impl Workspace {
             let form = subagents.get(agent);
             let catalog = s.custom_subagents.get(agent).catalog.clone();
             let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
-            harness::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
+            harness::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog, cross_harness: form.cross_harness }
         }));
         let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models || s.claude_subagents != subagents.claude_subagents;
         s.limits = limits;
