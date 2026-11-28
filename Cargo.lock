@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "m4code"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
