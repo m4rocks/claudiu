@@ -64,7 +64,8 @@ fn default_auto_compact_threshold() -> u64 {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
-    /// Explicit path to the `claude` executable; discovery is used when empty.
+    /// Explicit path to the executable of the adapter with `custom_path` (Claude Code's); discovery is used when empty.
+    /// Read it through `executable_path`.
     #[serde(default)]
     pub claude_path: Option<PathBuf>,
     /// Program for new terminal sessions (a path or a name on PATH); the platform default shell when empty.
@@ -211,6 +212,12 @@ impl FollowUp {
 }
 
 impl Settings {
+    /// The executable path set for `harness`. Only an adapter with `custom_path` has one; it is saved as
+    /// `claude_path`, the key older versions read.
+    pub fn executable_path(&self, harness: crate::harness::Harness) -> Option<&std::path::Path> {
+        self.claude_path.as_deref().filter(|_| harness.adapter().custom_path)
+    }
+
     pub fn subagent_access(&self, harness: crate::harness::Harness) -> crate::harness::SubagentAccess {
         match harness.agent() {
             None => self.claude_subagents,

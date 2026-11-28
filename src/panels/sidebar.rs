@@ -847,7 +847,7 @@ impl Workspace {
         let t = now();
         let settings = &self.store.data.settings;
         let display = settings.usage_display;
-        let usage = &self.store.data.claude_usage;
+        let usage = self.store.data.usage_pools(Harness::Claude).into_iter().next().map(|pool| pool.usage).unwrap_or_default();
 
         // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
         // reading saved before launch. Without one, the reading's age says how far to trust it.

@@ -96,7 +96,11 @@ pub struct Adapter {
     pub full_access_relaunch: bool,
     pub native_compaction_managed: bool,
     pub fallback_question: bool,
+    /// Finds the agent's executable, given the path set in Settings for an adapter with `custom_path`.
     pub discover: fn(Option<&Path>) -> Option<PathBuf>,
+    /// Whether Settings has a field for the executable's path. Such an executable is found before any session starts;
+    /// the others are found in the background.
+    pub custom_path: bool,
     pub probe_env: fn(Option<&Path>) -> Result<Environment, String>,
     pub config_root: fn(&Path) -> PathBuf,
     pub project_skills: &'static str,
@@ -113,6 +117,53 @@ pub struct Adapter {
     pub copies_skills: bool,
     /// The actions the core may take with this agent (`capabilities.rs`).
     pub capabilities: capabilities::Capabilities,
+    /// Reads the figures its sessions report outside ACP, such as the files Claude Code's mod writes.
+    pub reports: Option<fn() -> Vec<SessionReport>>,
+    /// The agent's own record of its running sessions, for an agent that keeps one.
+    pub native_sessions: Option<NativeSessions>,
+    /// Start-up housekeeping: deletes the old files the adapter left in m4code's data folder.
+    pub tidy: fn(),
+}
+
+/// What an agent keeps about its own sessions outside ACP.
+pub struct NativeSessions {
+    /// Each session's status (`busy`, `idle` or `waiting`) by its agent session id. Runs off the UI thread once a
+    /// second.
+    pub statuses: fn() -> std::collections::HashMap<String, String>,
+    /// Gives a running session its name in the agent's own records, or takes it away with `None`.
+    pub write_name: fn(&str, Option<&str>),
+    /// Whether the agent saved a conversation under this session id.
+    pub has_transcript: fn(&str) -> bool,
+}
+
+/// One session's figures, as its agent reported them outside ACP. A missing figure keeps the one stored before.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionReport {
+    pub session_id: String,
+    pub five_hour: Option<crate::store::RateLimit>,
+    pub seven_day: Option<crate::store::RateLimit>,
+    /// 0.0..=1.0 (tokens over the window).
+    pub context_fraction: Option<f32>,
+    pub context_tokens: Option<u64>,
+    pub context_window: Option<u64>,
+    pub model: Option<String>,
+    pub captured_at: i64,
+    /// Whether the agent compacts on its own.
+    #[serde(default)]
+    pub auto_compact: Option<bool>,
+    /// Whether the agent compacts in the background; `None` while it does not offer it.
+    #[serde(default)]
+    pub precompute_compact: Option<bool>,
+    /// The advisor model setting (`opus`, `sonnet`, ...); `None` when the advisor is off.
+    #[serde(default)]
+    pub advisor: Option<String>,
+    /// The advisor the current conversation declared; it follows `advisor` on `/clear` or `/compact` and when the
+    /// advisor is switched off or on, but not when only the model changes mid-conversation.
+    #[serde(default)]
+    pub advisor_active: Option<String>,
+    /// Tokens at which auto-compaction runs; `None` while it is off or not yet known.
+    #[serde(default)]
+    pub compact_at: Option<u64>,
 }
 
 /// Where an agent's 5-hour and weekly limits come from. No reading costs tokens.
@@ -329,6 +380,7 @@ static UNAVAILABLE_ADAPTER: Adapter = Adapter {
     native_compaction_managed: false,
     fallback_question: false,
     discover: |_| None,
+    custom_path: false,
     probe_env: no_probe_env,
     config_root: Path::to_path_buf,
     project_skills: "",
@@ -347,6 +399,9 @@ static UNAVAILABLE_ADAPTER: Adapter = Adapter {
     probe_session_meta: None,
     copies_skills: false,
     capabilities: capabilities::Capabilities::NONE,
+    reports: None,
+    native_sessions: None,
+    tidy: || {},
 };
 
 /// Default single placeholder model for an adapter before its ACP server reports a live catalog.

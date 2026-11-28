@@ -157,28 +157,28 @@ impl Workspace {
         )
     }
 
-    /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
+    /// Once a second: derive each terminal session's `Activity` from its agent's own status or its output. When one stops working
     /// while the user isn't looking at it, mark it for attention, and if the whole window is in the
     /// background as well, send a system notification.
     pub(super) fn start_activity_poll(&mut self, window: &Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
-            let mut seen = claude::StatusFiles::default();
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let (statuses, requests, back) = cx
+                let (statuses, requests) = cx
                     .background_executor()
                     .spawn(async move {
-                        let statuses = Harness::Claude.is_registered().then(claude::claude_home).flatten()
-                            .map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
-                        (statuses, crate::mcp::bridge::take_requests(), seen)
+                        let statuses: HashMap<String, String> = Harness::registered()
+                            .filter_map(|harness| harness.adapter().native_sessions.as_ref())
+                            .flat_map(|native| (native.statuses)())
+                            .collect();
+                        (statuses, crate::mcp::bridge::take_requests())
                     })
                     .await;
-                seen = back;
                 let update = this.update_in(cx, |ws, window, cx| {
                     ws.serve_requests(requests, window, cx);
                     ws.run_pending_switches(&statuses, window, cx);
                     ws.check_open_files(window, cx);
-                    ws.claude_statuses = statuses;
+                    ws.native_statuses = statuses;
                     ws.update_activity(window, cx)
                 });
                 if update.is_err() {
@@ -190,11 +190,11 @@ impl Workspace {
     }
 
     /// Work out each session's row state and alert on a finished turn or a new question. Runs on the activity poll,
-    /// and at once when a thread's turn ends. A terminal session reads Claude Code's own busy/idle/waiting from the
-    /// last poll (`claude_statuses`); one it doesn't list (older Claude Code, no registry file) falls back to the
-    /// terminal-output heuristic.
+    /// and at once when a thread's turn ends. A terminal session reads its agent's own busy/idle/waiting from the
+    /// last poll (`native_statuses`); one it doesn't list (an agent that keeps no status, or an older version of one)
+    /// falls back to the terminal-output heuristic.
     pub(super) fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let statuses = std::mem::take(&mut self.claude_statuses);
+        let statuses = std::mem::take(&mut self.native_statuses);
         let window_active = window.is_window_active();
         let editing = self.editing();
         let shown = self.active_id().cloned();
@@ -260,7 +260,7 @@ impl Workspace {
                 next.insert(l.id.clone(), now);
             }
         }
-        self.claude_statuses = statuses;
+        self.native_statuses = statuses;
         self.idle_since.retain(|id, _| next.get(id) == Some(&Activity::Working));
         if next != self.activity {
             self.activity = next;
@@ -275,25 +275,25 @@ impl Workspace {
         for text in toast_notices {
             self.toast(text, cx);
         }
-        self.sync_claude_names();
+        self.sync_native_names();
     }
 
-    /// Claude Code keeps its own session name (`/resume`, Remote Control, the mobile apps). `--name` covers
-    /// launches; for a running session the name goes to its name file and the mod runs `/rename` once Claude
-    /// Code is idle. Nothing is typed into the PTY.
-    fn sync_claude_names(&mut self) {
+    /// An agent that keeps its own session names (Claude Code's `/resume`, Remote Control, the mobile apps) gets the
+    /// chosen title. A launch passes it as a flag; for a running session the adapter writes it where the agent picks
+    /// it up. Nothing is typed into the PTY.
+    fn sync_native_names(&mut self) {
         for l in &mut self.live {
-            let Some((cid, w)) = self
+            let Some((write_name, cid, w)) = self
                 .store
                 .session(&l.id)
-                .filter(|r| r.agent.as_ref().is_some_and(|m| m.harness == Harness::Claude))
-                .and_then(|r| Some((r.provider_session_id()?, r.chosen_title()?)))
-                .filter(|(_, w)| l.claude_name.as_deref() != Some(*w))
+                .and_then(|r| Some((r.agent.as_ref()?.harness.adapter().native_sessions.as_ref()?.write_name, r)))
+                .and_then(|(write_name, r)| Some((write_name, r.provider_session_id()?, r.chosen_title()?)))
+                .filter(|(_, _, w)| l.native_name.as_deref() != Some(*w))
             else {
                 continue;
             };
-            l.claude_name = Some(w.to_string());
-            claude::write_name(cid, Some(w));
+            l.native_name = Some(w.to_string());
+            write_name(cid, Some(w));
         }
     }
 
@@ -305,7 +305,7 @@ impl Workspace {
         self.sync_attached(cx);
         self.refresh_if_stale(cx);
         self.refresh_marks(cx);
-        self.raise_claude_priority(cx);
+        self.raise_agent_priority(cx);
         self.refresh_pending(cx);
         // The steps above redraw when they change something. The sidebar's "5m ago" and the reset countdowns count
         // in minutes, so they need a redraw only when the minute turns.
@@ -316,19 +316,19 @@ impl Workspace {
         }
     }
 
-    /// Windows: run the Claude sessions above the builds and tests they start.
-    fn raise_claude_priority(&self, cx: &mut Context<Self>) {
+    /// Windows: run the agent sessions above the builds and tests they start.
+    fn raise_agent_priority(&self, cx: &mut Context<Self>) {
         #[cfg(windows)]
         {
             // Only a session still drawn in a terminal has a process id here. Agents now run as ACP processes,
             // whose ids the chat view doesn't expose yet, so they keep the normal priority until it does.
-            let claude_pids: Vec<u32> = self
+            let agent_pids: Vec<u32> = self
                 .live
                 .iter()
                 .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Agent))
                 .filter_map(|l| l.view.terminal()?.read(cx).terminal.process_id())
                 .collect();
-            cx.background_executor().spawn(async move { crate::priority::raise_claude_priority(&claude_pids) }).detach();
+            cx.background_executor().spawn(async move { crate::priority::raise_agent_priority(&agent_pids) }).detach();
         }
         #[cfg(not(windows))]
         let _ = cx;

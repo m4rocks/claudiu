@@ -205,20 +205,21 @@ impl Workspace {
         Ok(())
     }
 
-    /// Start the switches whose session has ended its turn. Looks at Claude Code's own status, as a switch from
-    /// the menu does, so the call that asked is finished and answered first.
+    /// Start the switches whose session has ended its turn. Looks at the agent's own status where it keeps one, as a
+    /// switch from the menu does, so the call that asked is finished and answered first.
     pub(super) fn run_pending_switches(&mut self, statuses: &std::collections::HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         let now = crate::store::now();
         let pending = std::mem::take(&mut self.pending_switches);
         for p in pending {
-            let claude_id = self.store.session(&p.id)
-                .filter(|r| r.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude))
+            let native_id = self.store.session(&p.id)
+                .filter(|r| r.agent.as_ref().is_some_and(|meta| meta.harness.adapter().native_sessions.is_some()))
                 .and_then(|r| r.provider_session_id());
-            // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
+            // Without a status (an older Claude Code keeps no registry) the view's own activity decides, as in
+            // `switch::inspect`.
             let idle = !self.switching_worktree.contains_key(&p.id)
                 && !self.pending_handoffs.contains_key(&p.id)
                 && self.live_view(&p.id).and_then(|v| v.thread()).is_none_or(|t| t.read(cx).can_move_workspace())
-                && match claude_id.and_then(|c| statuses.get(c)) {
+                && match native_id.and_then(|c| statuses.get(c)) {
                     Some(status) => status == "idle",
                     None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
                 };

@@ -59,6 +59,7 @@ pub const ADAPTER: Adapter = Adapter {
     native_compaction_managed: false,
     fallback_question: false,
     discover,
+    custom_path: true,
     probe_env: |exe| exe.map(probe_env).ok_or_else(|| "Could not find the Claude Code CLI.".into()),
     config_root: |home| home.join(".claude"),
     project_skills: ".claude/skills",
@@ -100,6 +101,17 @@ pub const ADAPTER: Adapter = Adapter {
     probe_session_meta: Some(|| serde_json::json!({ "claudeCode": { "options": { "persistSession": false } } })),
     copies_skills: false,
     capabilities: super::capabilities::Capabilities::ALL,
+    reports: Some(|| usage::read_snapshots(&usage::snapshot_dir())),
+    native_sessions: Some(super::NativeSessions {
+        statuses: native_statuses,
+        write_name,
+        has_transcript: |session_id| claude_home().and_then(|home| find_transcript(&home, session_id)).is_some(),
+    }),
+    tidy: || {
+        crate::datadir::prune(trim::settings_dir(), 7 * 86_400);
+        crate::datadir::prune(usage::snapshot_dir(), 30 * 86_400);
+        crate::datadir::prune(usage::ctl_dir(), 7 * 86_400);
+    },
 };
 
 /// Where Claude Code's own `EnterWorktree` or `ExitWorktree` took session `session_id`, read from its transcript.
@@ -350,6 +362,13 @@ type StatusRecord = (Option<std::time::SystemTime>, u64, Option<(String, i64, St
 /// again, since a timestamp may not have moved yet (coarse clocks) when a status of the same length replaced another.
 #[derive(Default)]
 pub struct StatusFiles(std::collections::HashMap<PathBuf, StatusRecord>);
+
+/// `session_statuses` for Claude Code's own folder, keeping what it read between polls.
+fn native_statuses() -> std::collections::HashMap<String, String> {
+    static SEEN: std::sync::LazyLock<Mutex<StatusFiles>> = std::sync::LazyLock::new(Default::default);
+    let Some(home) = claude_home() else { return Default::default() };
+    session_statuses(&home, &mut SEEN.lock().unwrap_or_else(|e| e.into_inner()))
+}
 
 /// Claude Code's own per-process registry (`sessions/<pid>.json`) says whether each session is `busy`, `idle`
 /// or `waiting`. Read-only; returns session id -> status, newest record winning (dead processes leave stale files).

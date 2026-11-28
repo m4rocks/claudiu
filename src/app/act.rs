@@ -347,7 +347,7 @@ impl Workspace {
                 let auto_handoff_model = s.auto_handoff_model.clone();
                 let default_model = s.default_model();
                 let text_generation_model = s.text_generation_model.clone();
-                let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
+                let claude_hint = self.executable(Harness::Claude).map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
                 self.executable_errors.clear();
                 let claude = self.executable_input(&claude_t, &claude_hint, window, cx);

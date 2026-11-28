@@ -133,7 +133,7 @@ impl Workspace {
 
     pub(crate) fn sign_in_to_harness(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
         let crate::harness::SignIn { program, locate, args, .. } = harness.adapter().sign_in;
-        let configured = self.claude_exe.clone();
+        let configured = self.executable(harness).map(std::path::Path::to_path_buf);
         cx.spawn_in(window, async move |this, cx| {
             let executable = cx.background_executor().spawn(async move { locate(configured.as_deref()) }).await;
             let _ = this.update_in(cx, |ws, window, cx| {

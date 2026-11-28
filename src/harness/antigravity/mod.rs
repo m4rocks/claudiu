@@ -43,6 +43,7 @@ pub const ADAPTER: Adapter = Adapter {
     native_compaction_managed: false,
     fallback_question: false,
     discover: |_| super::runner::locate(Agent::Antigravity),
+    custom_path: false,
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".gemini").join("config"),
     project_skills: ".agents/skills",
@@ -75,6 +76,9 @@ pub const ADAPTER: Adapter = Adapter {
     probe_session_meta: None,
     copies_skills: true,
     capabilities: super::capabilities::Capabilities::ALL,
+    reports: None,
+    native_sessions: None,
+    tidy: || {},
 };
 
 #[cfg(feature = "adapter-antigravity")]

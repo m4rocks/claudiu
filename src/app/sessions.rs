@@ -190,7 +190,7 @@ impl Workspace {
             name,
             child_edits,
             settings,
-            executable_override: self.claude_exe.as_deref(),
+            executable_override: self.executable(meta.harness),
             chrome: meta.chrome,
         };
         if let Err(error) = (adapter.prepare)(&input, &mut plan) {
@@ -616,12 +616,15 @@ impl Workspace {
 
     /// Keep the new view among the live sessions and show it.
     #[allow(clippy::too_many_arguments)]
-    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, claude_name: Option<String>, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
-        if let Some(cid) = self.store.session(&id).and_then(|r| r.provider_session_id()) {
-            claude::write_name(cid, claude_name.as_deref());
+    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, native_name: Option<String>, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The agent reads the launch name first and leaves it alone; a stale name would otherwise rename the session.
+        if let Some(rec) = self.store.session(&id)
+            && let Some(native) = rec.agent.as_ref().and_then(|meta| meta.harness.adapter().native_sessions.as_ref())
+            && let Some(cid) = rec.provider_session_id()
+        {
+            (native.write_name)(cid, native_name.as_deref());
         }
-        self.live.push(Live { id: id.clone(), view, _sub: sub, claude_name });
+        self.live.push(Live { id: id.clone(), view, _sub: sub, native_name });
         self.remember(&id);
         if !foreground {
             cx.notify();
@@ -876,13 +879,13 @@ fn resume_options(meta: &AgentMeta) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
-/// session nobody has written to has none, and `claude --resume` ends at once on it.
+/// Whether the agent has a conversation for the session: one it listed on a scan, or a transcript on disk. A
+/// session nobody has written to has none, and resuming it (`claude --resume`) ends at once.
 fn has_conversation(record_id: &str, meta: &AgentMeta) -> bool {
     crate::harness::thread::has_saved_conversation(record_id)
         || meta.external != ExternalState::Unknown
         || meta.transcript.is_some()
-        || claude::claude_home().and_then(|h| claude::find_transcript(&h, &meta.session_id)).is_some()
+        || meta.harness.adapter().native_sessions.as_ref().is_some_and(|native| (native.has_transcript)(&meta.session_id))
 }
 
 #[cfg(test)]

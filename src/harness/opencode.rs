@@ -62,6 +62,7 @@ pub const ADAPTER: Adapter = Adapter {
     native_compaction_managed: true,
     fallback_question: true,
     discover: |_| crate::platform::find_executable("opencode"),
+    custom_path: false,
     probe_env: super::no_probe_env,
     config_root,
     project_skills: ".opencode/skills",
@@ -80,6 +81,9 @@ pub const ADAPTER: Adapter = Adapter {
     probe_session_meta: None,
     copies_skills: false,
     capabilities: super::capabilities::Capabilities::ALL,
+    reports: None,
+    native_sessions: None,
+    tidy: || {},
 };
 
 fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {

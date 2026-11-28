@@ -31,7 +31,7 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
 
     // Inject a uniform lister for all harnesses (including Claude Code) and trigger background model loading.
     ws.update(&mut cx, |ws, cx| {
-        ws.claude_exe = Some(PathBuf::from("/fake/claude"));
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some(PathBuf::from("/fake/claude"));
         ws.store.data.settings.enabled_harnesses = Some(vec![Harness::Claude, Harness::Codex]);
         ws.model_lookups.list = |harness, _cwd, _env| match harness {
             Harness::Claude => Ok(crate::harness::HarnessCatalog {

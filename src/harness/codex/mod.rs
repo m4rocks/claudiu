@@ -162,6 +162,7 @@ pub const ADAPTER: Adapter = Adapter {
         let codex = crate::platform::find_executable("codex")?;
         crate::platform::find_executable("npx").map(|_| codex)
     }),
+    custom_path: false,
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".codex"),
     project_skills: ".codex/skills",
@@ -198,6 +199,9 @@ pub const ADAPTER: Adapter = Adapter {
     probe_session_meta: None,
     copies_skills: false,
     capabilities: super::capabilities::Capabilities::ALL,
+    reports: None,
+    native_sessions: None,
+    tidy: || {},
 };
 
 /// How Codex (`codex-acp`) reports background work over ACP:
