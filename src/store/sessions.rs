@@ -53,8 +53,10 @@ pub struct AgentMeta {
     /// The harness the session runs in. Sessions from before there was a choice ran in Claude Code.
     #[serde(default)]
     pub harness: crate::harness::Harness,
-    #[serde(default)]
-    pub antigravity_full_access: bool,
+    /// The session's agent started with full access on its command line, for an adapter that relaunches to change it.
+    /// Saved under its first name, which older builds read.
+    #[serde(default, rename = "antigravity_full_access")]
+    pub launched_full_access: bool,
     /// Retry Read-only startup if the adapter stopped before confirming the mode.
     #[serde(default)]
     pub read_only_pending: bool,
@@ -179,6 +181,11 @@ impl SessionRecord {
     /// The harness's id for the session, once it has one.
     pub fn provider_session_id(&self) -> Option<&str> {
         self.agent.as_ref().map(|c| c.session_id.as_str()).filter(|id| !id.is_empty())
+    }
+
+    /// The harness an agent session runs on; a terminal session has none.
+    pub fn harness(&self) -> Option<crate::harness::Harness> {
+        self.agent.as_ref().map(|meta| meta.harness)
     }
 }
 

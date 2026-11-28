@@ -390,7 +390,7 @@ impl Workspace {
     /// launch the save also creates the state file and enables whichever harnesses were found.
     pub fn apply_setup(&mut self, claude_path: Option<PathBuf>, enabled: Vec<crate::harness::Harness>, cx: &mut Context<Self>) {
         self.store.data.settings.claude_path = claude_path;
-        self.claude_exe = (Harness::Claude.adapter().discover)(self.store.data.settings.claude_path.as_deref());
+        self.discover_executables(cx);
         if self.store.data.settings.enabled_harnesses.is_none() && !enabled.is_empty() {
             self.store.data.settings.harness = enabled[0];
             self.store.data.settings.enabled_harnesses = Some(enabled);

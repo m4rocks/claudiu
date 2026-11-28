@@ -61,7 +61,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         // Keep deferred restore_open from restoring one of their adapters into this fixture.
         ws.store = crate::store::Store::load(state.path().join("state.json"));
         ws.acp_server = Some(server_for("claude"));
-        ws.claude_exe = Some("unused-by-the-fake-agent".into());
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some("unused-by-the-fake-agent".into());
         assert!(ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, Some(Permission::Auto), window, cx));
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
@@ -168,7 +168,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         step(&mut cx, &|ws, window, cx| {
             let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
             assert_eq!(meta.session_id, "fake-session");
-            assert_eq!(meta.antigravity_full_access, permission == Permission::FullAccess);
+            assert_eq!(meta.launched_full_access, permission == Permission::FullAccess);
             let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
             assert_eq!(view.read(cx).permission(), Some(permission));
             assert_eq!(view.read(cx).draft(cx), "keep this draft");
@@ -295,7 +295,7 @@ fn restart_reuses_provider_session_respects_capabilities_and_records_cache_usage
     step(&mut cx, &|ws, window, cx| {
         ws.store = crate::store::Store::load(state.path().join("state.json"));
         ws.acp_server = Some(server.clone());
-        ws.claude_exe = Some("unused-by-the-fake-agent".into());
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some("unused-by-the-fake-agent".into());
         ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("first turn".into()), None, None, window, cx);
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
@@ -442,7 +442,7 @@ fn interrupted_handoff_preserves_source_session_and_history() {
     step(&mut cx, &|ws, window, cx| {
         ws.store = crate::store::Store::load(state.path().join("state.json"));
         ws.acp_server = Some(server.clone());
-        ws.claude_exe = Some("unused-by-the-fake-agent".into());
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some("unused-by-the-fake-agent".into());
         ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("before handoff".into()), None, None, window, cx);
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
@@ -629,7 +629,7 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
     };
     step(&mut cx, &|ws, _, _| {
         ws.acp_server = Some(fake_agent(work.path()));
-        ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some(PathBuf::from("unused-by-the-fake-agent"));
         ws.store.data.settings.enabled_harnesses = None;
         ws.store.data.settings.custom_subagents = Default::default();
         ws.store.data.settings.claude_picked = vec!["haiku".into()];
@@ -783,7 +783,7 @@ fn home_does_not_launch_without_a_message() {
     for creating in [false, true] {
         for text in ["", " \n\t "] {
             cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
-                ws.claude_exe = None;
+                *ws.executables.get_mut(crate::harness::Harness::Claude) = None;
                 ws.home.creating = creating.then(|| PathBuf::from("/pending-worktree"));
                 ws.home.prompt.update(cx, |p, cx| p.set_value(text, window, cx));
                 ws.act(Act::HomeLaunch, window, cx);
@@ -810,7 +810,7 @@ fn a_missing_claude_offers_the_setup_window() {
 
     cx.update_window(window, |_, window, app| {
         ws.update(app, |ws, cx| {
-            ws.claude_exe = None;
+            *ws.executables.get_mut(crate::harness::Harness::Claude) = None;
             ws.new_session(work.path().to_path_buf(), window, cx);
         })
     })
@@ -1288,7 +1288,7 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
         // tests that share the throwaway data folder as Claude Code's catalog.
         ws.store = crate::store::Store::load(state.path().join("state.json"));
         ws.acp_server = Some(server.clone());
-        ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some(PathBuf::from("unused-by-the-fake-agent"));
         ws.store.data.settings.enabled_harnesses = None;
         ws.store.data.settings.set_harness_models(Harness::Codex, vec![crate::harness::subagents::AgentModel { id: "gpt-6".into(), name: "GPT-6".into() }]);
         ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("parent".into()), None, None, window, cx);

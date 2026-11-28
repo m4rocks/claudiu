@@ -6,6 +6,9 @@
 pub mod limits;
 pub mod read_only;
 
+use super::subagents::Provider;
+use crate::panels::logos;
+
 #[cfg(feature = "adapter-antigravity")]
 use super::subagents::Agent;
 
@@ -40,6 +43,7 @@ pub const ADAPTER: Adapter = Adapter {
     native_compaction_managed: false,
     fallback_question: false,
     discover: |_| super::runner::locate(Agent::Antigravity),
+    custom_path: false,
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".gemini").join("config"),
     project_skills: ".agents/skills",
@@ -49,6 +53,32 @@ pub const ADAPTER: Adapter = Adapter {
         background: Some(super::BackgroundHooks { from_update: background_update, finished: task_finished, live_execute_tools: true }),
         ..super::ProtocolHooks::DEFAULT
     },
+    sign_in: super::SignIn {
+        program: "agy",
+        locate: |_| super::find("agy"),
+        args: &[],
+        session_hint: "Run `agy` and sign in, then retry the session.",
+        run_hint: "Antigravity isn't signed in. Run `agy` and sign in, then try again.",
+    },
+    // Off pending clarification of Google's terms for usage polling. Back on, it reads:
+    // usage: Some(super::UsageSource {
+    //     read: |_| limits::read(&super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?, &crate::datadir::data_dir()),
+    //     every: limits::REFRESH_EVERY,
+    //     after_turn: false,
+    //     live: None,
+    // }),
+    usage: None,
+    text_generation_launch: |launch, data| {
+        let folder = read_only::prepare_text_generation(data).map_err(|e| format!("Could not disable Antigravity tools: {e}"))?;
+        launch.args.extend(["--gemini-dir".into(), folder.to_string_lossy().into_owned()]);
+        Ok(serde_json::Value::Null)
+    },
+    probe_session_meta: None,
+    copies_skills: true,
+    capabilities: super::capabilities::Capabilities::ALL,
+    reports: None,
+    native_sessions: None,
+    tidy: || {},
 };
 
 #[cfg(feature = "adapter-antigravity")]
@@ -100,3 +130,30 @@ mod background {
     }
 
 }
+
+/// How this agent runs as a custom subagent (`harness/subagents.rs`).
+pub const PROVIDER: Provider = Provider {
+    dashboard_url: Some("https://antigravity.google.com/remote?settingsOpen=true&settingsScreen=Models"),
+    color: |t| t.antigravity,
+    marks: logos::antigravity_marks,
+    name: "Antigravity",
+    key: "antigravity",
+    task_name: "Google Antigravity",
+    triggers: "Antigravity, Gemini",
+    program: "agy",
+    args: &["acp"],
+    windows_fallback: Some("agy/bin/agy.exe"),
+    server: "agy",
+    missing: "agy was not found. Antigravity subagents need the Antigravity CLI installed.",
+    // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
+    // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
+    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
+    task_args: super::runner::antigravity_args,
+    environment: super::runner::no_env,
+    config_options: super::runner::antigravity_options,
+    inbox_without_steering: false,
+    steering_prompt_required: false,
+    deferred_tool_target: false,
+    // agy gives a command about ten seconds, then moves it to the background and ends the turn.
+    resumes_after_background: true,
+};

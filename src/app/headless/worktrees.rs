@@ -54,7 +54,7 @@ fn switching_between_worktrees_in_the_workspace() {
     #[cfg(unix)]
     std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     ws.update(&mut cx, |ws, _| {
-        ws.claude_exe = Some(fake.clone());
+        *ws.executables.get_mut(crate::harness::Harness::Claude) = Some(fake.clone());
         ws.acp_server = Some(fake_agent(work.path()));
     });
 

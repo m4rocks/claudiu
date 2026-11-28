@@ -148,6 +148,9 @@ impl Workspace {
         if !adapter.fallback_question {
             plan.off.push("ask_user");
         }
+        if !adapter.capabilities.spawns_subagents.allowed() {
+            plan.off.extend(mcp::SUBAGENT_TOOLS);
+        }
         let (mut permission, options) = match session_id {
             None => {
                 // Only inherit the default model id when starting on the harness that serves it.
@@ -163,7 +166,7 @@ impl Workspace {
                 (permission, harness::defaults::config_options(&defaults))
             }
             Some(_) => (
-                meta.permission.or_else(|| (adapter.full_access_relaunch && meta.antigravity_full_access).then_some(Permission::FullAccess)),
+                meta.permission.or_else(|| (adapter.full_access_relaunch && meta.launched_full_access).then_some(Permission::FullAccess)),
                 resume_options(meta),
             ),
         };
@@ -171,7 +174,13 @@ impl Workspace {
             permission = Some(Permission::ReadOnly);
         }
         let child_edits = meta.parent_session.as_ref().map(|_| meta.subagent_edits);
-        if child_edits.is_some() {
+        if let Some(parent) = &meta.parent_session {
+            // A resumed or handed-off subagent asks again, as a new one does.
+            let parent = self.store.session(parent).and_then(SessionRecord::harness);
+            if let Some(refusal) = harness::capabilities::subagent(parent, meta.harness).refusal() {
+                self.toast(refusal, cx);
+                return None;
+            }
             permission = None;
         }
         let input = harness::SessionInput {
@@ -181,7 +190,7 @@ impl Workspace {
             name,
             child_edits,
             settings,
-            executable_override: self.claude_exe.as_deref(),
+            executable_override: self.executable(meta.harness),
             chrome: meta.chrome,
         };
         if let Err(error) = (adapter.prepare)(&input, &mut plan) {
@@ -189,7 +198,8 @@ impl Workspace {
             return None;
         }
         let targets: Vec<_> = settings.enabled_harnesses_list().into_iter()
-            .filter(|h| settings.subagent_access(*h).on).map(Harness::key).collect();
+            .filter(|h| settings.subagent_access(*h).on && harness::capabilities::subagent(meta.harness, *h).allowed())
+            .map(Harness::key).collect();
         let project = self.store.project_for_cwd(cwd).and_then(|id| self.store.project(&id)).map(|p| p.path.as_path());
         let tools = match mcp::session::SessionTools::new(record_id, cwd, project, &plan.off, &targets) {
             Ok(tools) => tools,
@@ -386,12 +396,12 @@ impl Workspace {
             match ev {
                 ThreadEvent::Ready(session) => {
                     ws.commit_handoff(&sub_id, session, window, cx);
-                    let full_access = view.read(cx).antigravity_full_access();
+                    let full_access = view.read(cx).launched_full_access();
                     if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
-                        && (meta.read_only_pending || meta.antigravity_full_access != full_access)
+                        && (meta.read_only_pending || meta.launched_full_access != full_access)
                     {
                         meta.read_only_pending = false;
-                        meta.antigravity_full_access = full_access;
+                        meta.launched_full_access = full_access;
                         ws.store.mark_dirty();
                     }
                 }
@@ -516,7 +526,7 @@ impl Workspace {
                 }
                 ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
                 ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
-                ThreadEvent::ReconnectPermission(permission) => ws.reconnect_antigravity_permission(&sub_id, *permission, window, cx),
+                ThreadEvent::ReconnectPermission(permission) => ws.reconnect_full_access_permission(&sub_id, *permission, window, cx),
                 ThreadEvent::NewSession(prompt) => {
                     let (harness, cwd) = ws
                         .store
@@ -553,6 +563,10 @@ impl Workspace {
         let Some(mut record) = self.store.session(source).cloned() else { return };
         let Some(thread) = self.live_view(source).and_then(|view| view.thread()).cloned() else { return };
         let view = thread.read(cx);
+        if let Some(refusal) = view.harness.adapter().capabilities.fork.refusal() {
+            self.toast(refusal, cx);
+            return;
+        }
         let Some(entries) = view.thread.entries.get(..end) else {
             self.toast("The original turn is unavailable in this transcript.", cx);
             return;
@@ -602,12 +616,15 @@ impl Workspace {
 
     /// Keep the new view among the live sessions and show it.
     #[allow(clippy::too_many_arguments)]
-    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, claude_name: Option<String>, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
-        if let Some(cid) = self.store.session(&id).and_then(|r| r.provider_session_id()) {
-            claude::write_name(cid, claude_name.as_deref());
+    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, native_name: Option<String>, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The agent reads the launch name first and leaves it alone; a stale name would otherwise rename the session.
+        if let Some(rec) = self.store.session(&id)
+            && let Some(native) = rec.agent.as_ref().and_then(|meta| meta.harness.adapter().native_sessions.as_ref())
+            && let Some(cid) = rec.provider_session_id()
+        {
+            (native.write_name)(cid, native_name.as_deref());
         }
-        self.live.push(Live { id: id.clone(), view, _sub: sub, claude_name });
+        self.live.push(Live { id: id.clone(), view, _sub: sub, native_name });
         self.remember(&id);
         if !foreground {
             cx.notify();
@@ -862,13 +879,13 @@ fn resume_options(meta: &AgentMeta) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
-/// session nobody has written to has none, and `claude --resume` ends at once on it.
+/// Whether the agent has a conversation for the session: one it listed on a scan, or a transcript on disk. A
+/// session nobody has written to has none, and resuming it (`claude --resume`) ends at once.
 fn has_conversation(record_id: &str, meta: &AgentMeta) -> bool {
     crate::harness::thread::has_saved_conversation(record_id)
         || meta.external != ExternalState::Unknown
         || meta.transcript.is_some()
-        || claude::claude_home().and_then(|h| claude::find_transcript(&h, &meta.session_id)).is_some()
+        || meta.harness.adapter().native_sessions.as_ref().is_some_and(|native| (native.has_transcript)(&meta.session_id))
 }
 
 #[cfg(test)]

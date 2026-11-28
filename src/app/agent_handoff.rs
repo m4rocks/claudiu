@@ -3,6 +3,7 @@
 //! sending the transcript + the user's new message as the first turn.
 
 use super::*;
+use crate::harness::capabilities::{self, Initiator};
 use crate::harness::thread::NoticeKind;
 
 /// Entries read from the end before the cut, so a long session is not turned into text whole.
@@ -45,11 +46,17 @@ impl Workspace {
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
-        if !self.store.data.settings.harness_enabled(to) {
+        let initiator = if by_agent { Initiator::Automatic } else { Initiator::User };
+        let refusal = if !self.store.data.settings.harness_enabled(to) {
+            Some(format!("{} is unavailable for this session.", to.name()))
+        } else {
+            capabilities::handoff(thread.read(cx).harness, to, initiator).refusal().map(String::from)
+        };
+        if let Some(refusal) = refusal {
             if !by_agent {
                 thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
             }
-            thread.update(cx, |v, cx| v.fail_handoff(format!("{} is unavailable for this session.", to.name()), cx));
+            thread.update(cx, |v, cx| v.fail_handoff(refusal, cx));
             return;
         }
         let cwd = rec.cwd.clone();
@@ -130,7 +137,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn reconnect_antigravity_permission(&mut self, id: &str, permission: Permission, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn reconnect_full_access_permission(&mut self, id: &str, permission: Permission, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_handoffs.contains_key(id) { return; }
         if self.switching_worktree.contains_key(id) {
             self.toast("Wait for the worktree switch to finish.", cx);
@@ -181,6 +188,15 @@ impl Workspace {
                 else if self.compacting.contains_key(id) { "Wait for compaction to finish." }
                 else { "Another session transition is already starting." };
             self.toast(reason, cx);
+            return;
+        }
+        let from = thread.read(cx).harness;
+        let refusal = from.adapter().capabilities.rewind.refusal().or_else(|| {
+            target_model.as_ref().and_then(|target| capabilities::handoff(from, target.harness, Initiator::User).refusal())
+        });
+        if let Some(refusal) = refusal {
+            thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
+            self.toast(refusal, cx);
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
@@ -398,7 +414,7 @@ impl Workspace {
     pub(super) fn compact_session(&mut self, id: &str, transcript: String, instructions: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
         if self.compacting.contains_key(id) || self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id)
-            || thread.read(cx).has_active_turn()
+            || thread.read(cx).has_active_turn() || !thread.read(cx).harness.adapter().capabilities.compaction_fallback.allowed()
         {
             thread.update(cx, |v, cx| v.cancel_compaction(cx));
             return;
@@ -413,13 +429,8 @@ impl Workspace {
             return;
         };
         let meta = rec.agent.clone().unwrap_or_default();
-        let gen_model = self.store.data.settings.text_generation_model.clone().unwrap_or_else(|| {
-            crate::store::TextGenerationModel {
-                harness: meta.harness,
-                id: meta.chosen_model.clone().unwrap_or_default(),
-            }
-        });
-        let env = self.harness_model_env(gen_model.harness).ok();
+        let generator = self.summary_model(meta.harness, meta.chosen_model.clone())
+            .and_then(|model| Some((self.harness_model_env(model.harness).ok()?, model)));
         let system = match instructions {
             Some(ref extra) if !extra.trim().is_empty() => format!(
                 "Summarize the following coding-session conversation concisely so work can continue in a fresh context window. \
@@ -431,7 +442,7 @@ impl Workspace {
         let session_id = id.to_string();
         let fallback = condensed_transcript(&transcript, 6000);
         cx.spawn_in(window, async move |this, cx| {
-            let summary = if let Some(env) = env {
+            let summary = if let Some((env, gen_model)) = generator {
                 let timeout = cx.background_executor().timer(std::time::Duration::from_secs(60));
                 match crate::harness::text_generation::complete(&gen_model, env, &system, &transcript, timeout).await {
                     Ok(text) if !text.trim().is_empty() => text.trim().to_string(),

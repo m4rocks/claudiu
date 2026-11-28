@@ -1,7 +1,6 @@
 //! Ending and starting m4code: the quit question, remembering what was open, and bringing it back.
 
 use super::*;
-use crate::harness::claude::{trim, usage};
 use crate::mcp;
 use crate::store::WindowGeom;
 use gpui::{Bounds, WindowBounds, point, px, size};
@@ -11,19 +10,19 @@ fn running_file() -> PathBuf {
     datadir::data_dir().join("running.json")
 }
 
-/// Start-up housekeeping: delete the old per-session files each folder's owner no longer reads. Nothing here touches
-/// Claude Code's own data.
+/// Start-up housekeeping: delete the old per-session files each folder's owner no longer reads, and let each adapter
+/// do the same for its own. Nothing here touches an agent's own data.
 pub fn tidy_leftovers() {
     let data = datadir::data_dir();
     let [mcp_configs, titles, names, attached] = mcp::cleanup_dirs();
     datadir::prune(names, 7 * 86_400);
     datadir::prune(attached, 7 * 86_400);
     datadir::prune(mcp_configs, 7 * 86_400);
-    datadir::prune(trim::settings_dir(), 7 * 86_400);
     // Nothing writes titles any more; the old files go.
     datadir::prune(titles, 7 * 86_400);
-    datadir::prune(usage::snapshot_dir(), 30 * 86_400);
-    datadir::prune(usage::ctl_dir(), 7 * 86_400);
+    for harness in crate::harness::Harness::registered() {
+        (harness.adapter().tidy)();
+    }
     datadir::prune(data.join("visual"), 7 * 86_400);
     datadir::prune(data.join("mcp-ready"), 86_400);
     datadir::prune(data.join("screens"), 30 * 86_400);

@@ -7,10 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
-use crate::store::RateLimit;
-
 /// Env var holding the directory the mod writes its snapshot into.
 pub const USAGE_DIR_ENV: &str = "M4CODE_USAGE_DIR";
 
@@ -45,34 +41,7 @@ pub fn send_ctl(file: &Path, key: &str, value: serde_json::Value) {
 }
 
 /// What the mod reports (no paths, no costs, no prompts).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub session_id: String,
-    pub five_hour: Option<RateLimit>,
-    pub seven_day: Option<RateLimit>,
-    /// 0.0..=1.0 (tokens over the window).
-    pub context_fraction: Option<f32>,
-    pub context_tokens: Option<u64>,
-    pub context_window: Option<u64>,
-    pub model: Option<String>,
-    pub captured_at: i64,
-    /// The `/config` auto-compact switch.
-    #[serde(default)]
-    pub auto_compact: Option<bool>,
-    /// The `/config` "Precompute compaction" switch (background compaction); `None` while Claude Code does not offer it.
-    #[serde(default)]
-    pub precompute_compact: Option<bool>,
-    /// The `advisorModel` setting (`opus`, `sonnet`, ...); `None` when the advisor is off.
-    #[serde(default)]
-    pub advisor: Option<String>,
-    /// The advisor the current conversation declared; it follows `advisor` on `/clear` or `/compact` and when the
-    /// advisor is switched off or on, but not when only the model changes mid-conversation.
-    #[serde(default)]
-    pub advisor_active: Option<String>,
-    /// Tokens at which auto-compaction runs; `None` while it is off or not yet known.
-    #[serde(default)]
-    pub compact_at: Option<u64>,
-}
+pub type Snapshot = crate::harness::SessionReport;
 
 pub fn snapshot_dir() -> PathBuf {
     crate::datadir::data_dir().join("usage")

@@ -466,7 +466,7 @@ pub struct ThreadView {
     pub detail: bool,
     pub(crate) subagent_edits: Option<bool>,
     pub(super) initial_permission: Option<Permission>,
-    antigravity_full_access: bool,
+    launched_full_access: bool,
     auto_fallback: bool,
     /// Each message's parsed markdown, by entry. The chat keeps it rather than the frame: a row that scrolls out of
     /// the list would otherwise drop it and parse again when it comes back, and a long message (over 4 KB) parses
@@ -731,7 +731,7 @@ impl ThreadView {
             detail: false,
             subagent_edits: None,
             initial_permission: start.permission,
-            antigravity_full_access: false,
+            launched_full_access: false,
             auto_fallback: false,
             markdown: HashMap::new(),
             user_md_len: HashMap::new(),
@@ -907,7 +907,7 @@ impl ThreadView {
                 }
                 break (connection, incoming, opened);
             };
-            let _ = this.update(cx, |v, _| v.antigravity_full_access = full_access);
+            let _ = this.update(cx, |v, _| v.launched_full_access = full_access);
             let Some(sid) = this.update(cx, |v, cx| v.opened(opened, cx)).ok().flatten() else {
                 return;
             };
@@ -1243,7 +1243,7 @@ impl ThreadView {
                     }
                     v.capabilities = opened.capabilities;
                     v.agent_meta = opened.agent_meta;
-                    v.antigravity_full_access = full_access;
+                    v.launched_full_access = full_access;
                     v.auto_fallback = auto_fallback;
                     v.session_id = Some(sid.clone());
                     v.thread.modes = probe.modes;
@@ -1659,7 +1659,7 @@ impl ThreadView {
     fn needs_login(&mut self, cx: &mut Context<Self>) {
         self.authentication_required = true;
         self.queue_held = true;
-        self.error = Some(acp::login_hint(self.harness).into());
+        self.error = Some(self.harness.adapter().sign_in.session_hint.into());
         cx.notify();
     }
 
@@ -1683,7 +1683,7 @@ impl ThreadView {
         self.cancel_questions();
         self.asks = Default::default();
         if why.as_deref().is_some_and(acp::looks_like_auth_error) { self.authentication_required = true; }
-        self.error = if self.authentication_required { Some(acp::login_hint(self.harness).into()) } else { why };
+        self.error = if self.authentication_required { Some(self.harness.adapter().sign_in.session_hint.into()) } else { why };
         if let Some(item) = self.preparing.take() {
             self.queue.push_front(item);
         }
@@ -1830,7 +1830,7 @@ impl ThreadView {
                 let id = opt.id.clone();
                 self.set_option(id, model.id, cx);
             }
-        } else {
+        } else if self.handoff_refusal(model.harness).is_none() {
             self.pending_model = Some(model);
         }
         self.picker = None;
@@ -1927,6 +1927,12 @@ impl ThreadView {
                     } else {
                         self.send_next(cx);
                     }
+                    cx.notify();
+                    return true;
+                }
+                if let Some(refusal) = self.capabilities().compaction_fallback.refusal() {
+                    let at = self.thread.notice(refusal, false);
+                    self.remeasure(at);
                     cx.notify();
                     return true;
                 }
@@ -2784,7 +2790,7 @@ impl ThreadView {
     }
 
     pub(crate) fn permission(&self) -> Option<Permission> {
-        if self.antigravity_full_access {
+        if self.launched_full_access {
             Some(Permission::FullAccess)
         } else {
             Permission::of(self.harness, self.thread.mode.as_deref()?)
@@ -2835,15 +2841,15 @@ impl ThreadView {
             return Some(Permission::ReadOnly);
         }
         let permission = self.permission()?;
-        if self.antigravity_full_access || permission.native(self.harness) == self.thread.mode.as_deref() {
+        if self.launched_full_access || permission.native(self.harness) == self.thread.mode.as_deref() {
             self.handoff_permission()
         } else {
             None
         }
     }
 
-    pub(crate) fn antigravity_full_access(&self) -> bool {
-        self.antigravity_full_access
+    pub(crate) fn launched_full_access(&self) -> bool {
+        self.launched_full_access
     }
 
     pub(crate) fn permission_error(&mut self, why: String, cx: &mut Context<Self>) {
@@ -2865,7 +2871,7 @@ impl ThreadView {
         let Some(permission) = wanted.resolve(&self.permissions()) else { return };
         let Some(mode) = permission.listed(self.harness, &self.thread.modes) else { return };
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
-        if self.harness.adapter().full_access_relaunch && self.antigravity_full_access != (permission == Permission::FullAccess) {
+        if self.harness.adapter().full_access_relaunch && self.launched_full_access != (permission == Permission::FullAccess) {
             self.require_read_only(wanted, cx);
             cx.emit(ThreadEvent::ReconnectPermission(wanted));
             return;

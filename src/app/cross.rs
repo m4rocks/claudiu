@@ -205,20 +205,21 @@ impl Workspace {
         Ok(())
     }
 
-    /// Start the switches whose session has ended its turn. Looks at Claude Code's own status, as a switch from
-    /// the menu does, so the call that asked is finished and answered first.
+    /// Start the switches whose session has ended its turn. Looks at the agent's own status where it keeps one, as a
+    /// switch from the menu does, so the call that asked is finished and answered first.
     pub(super) fn run_pending_switches(&mut self, statuses: &std::collections::HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         let now = crate::store::now();
         let pending = std::mem::take(&mut self.pending_switches);
         for p in pending {
-            let claude_id = self.store.session(&p.id)
-                .filter(|r| r.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude))
+            let native_id = self.store.session(&p.id)
+                .filter(|r| r.agent.as_ref().is_some_and(|meta| meta.harness.adapter().native_sessions.is_some()))
                 .and_then(|r| r.provider_session_id());
-            // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
+            // Without a status (an older Claude Code keeps no registry) the view's own activity decides, as in
+            // `switch::inspect`.
             let idle = !self.switching_worktree.contains_key(&p.id)
                 && !self.pending_handoffs.contains_key(&p.id)
                 && self.live_view(&p.id).and_then(|v| v.thread()).is_none_or(|t| t.read(cx).can_move_workspace())
-                && match claude_id.and_then(|c| statuses.get(c)) {
+                && match native_id.and_then(|c| statuses.get(c)) {
                     Some(status) => status == "idle",
                     None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
                 };
@@ -347,6 +348,10 @@ impl Workspace {
                 let effort = effort_for(req.args["effort"].as_str(), model.is_some());
                 match model {
                     Some(model) if req.args["cross"].as_bool() == Some(true) => {
+                        let from = thread.read(cx).harness;
+                        if let Some(refusal) = crate::harness::capabilities::handoff(from, model.harness, crate::harness::capabilities::Initiator::Automatic).refusal() {
+                            return Err(refusal.into());
+                        }
                         let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);
                         let name = model.name.clone();
                         thread.update(cx, |t, cx| t.hand_off_after_turn(model, effort, message, cx));

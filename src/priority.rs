@@ -1,18 +1,18 @@
-//! Windows only: run the `claude` processes at above normal priority, so a heavy build in one session cannot slow
-//! the sessions down. Only `claude` itself is raised. Windows gives a child the normal class unless its parent is
+//! Windows only: run the agent processes at above normal priority, so a heavy build in one session cannot slow
+//! the sessions down. Only the agent itself is raised. Windows gives a child the normal class unless its parent is
 //! below normal, so bash, cargo and rustc start at normal priority and stay as they are.
 
-/// Raise the given `claude` processes to above normal priority. A process that already runs at another class was set
+/// Raise the given agent processes to above normal priority. A process that already runs at another class was set
 /// by the user or another tool and is left alone.
 #[cfg(windows)]
-pub fn raise_claude_priority(claude_pids: &[u32]) {
+pub fn raise_agent_priority(agent_pids: &[u32]) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         ABOVE_NORMAL_PRIORITY_CLASS, GetPriorityClass, NORMAL_PRIORITY_CLASS, OpenProcess,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, SetPriorityClass,
     };
 
-    for &pid in claude_pids {
+    for &pid in agent_pids {
         // SAFETY: the handle is checked for null before use and closed after.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, 0, pid);

@@ -324,7 +324,7 @@ const MANAGED_COPY_MARKER: &str = ".m4code-skill-managed";
 /// Whether `harness` discovers skills with a non-symlink-following directory scan (e.g. Go's `os.ReadDir` +
 /// `entry.IsDir()`), requiring real copied directories rather than symlinks/junctions.
 fn uses_copied_skills(harness: Harness) -> bool {
-    harness == Harness::Antigravity
+    harness.adapter().copies_skills
 }
 
 /// Sibling m4code app folder names under the shared vendor directory (`m4rocks/`) so dev and release builds

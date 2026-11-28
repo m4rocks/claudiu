@@ -686,6 +686,7 @@ impl ThreadView {
             &self.picker_nav,
             models,
             move |h| (h == current_harness && has_other_harness).then_some("current"),
+            move |h| crate::harness::capabilities::subagent(current_harness, h).refusal(),
             |v, choice, _, cx| v.start_cross_model_review(choice, cx),
             |v, _, cx| v.close_review_model_picker(cx),
             window,
@@ -777,8 +778,11 @@ impl ThreadView {
             .child(div().flex_1().text_color(theme().muted_foreground).child(if review.snapshot.is_some() { "Changes since your last message" } else { "Changes captured at the end of this turn" }))
             .when_some(turn, |footer, turn| {
                 let (id, end) = (turn.id, turn.end);
+                let fork_refusal = self.capabilities().fork.refusal();
                 footer.when(!review.restoring, |footer| footer.child(
                     btn::text("review-fork", "Fork Thread", false)
+                        .disabled(fork_refusal.is_some())
+                        .when_some(fork_refusal, |button, refusal| gpui::StatefulInteractiveElement::tooltip(button, crate::panels::ui::tooltip::tooltip(refusal)))
                         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Fork(end)))),
                 )).when(!review.restoring && review.files.is_some() && review.error.is_none() && self.can_restore(turn), |footer| {
                     footer.child(btn::text("review-restore", "Restore checkpoint", false).debug_selector(|| "review-restore".into())

@@ -30,6 +30,10 @@ impl Workspace {
         };
         {
             let t = thread.read(cx);
+            if let Some(refusal) = t.harness.adapter().capabilities.continue_fresh.refusal() {
+                self.toast(refusal, cx);
+                return;
+            }
             if t.has_active_turn() {
                 self.toast("Wait for the current turn to finish before continuing in a fresh session.", cx);
                 return;
@@ -91,18 +95,13 @@ impl Workspace {
         self.toast("Summarizing session for fresh linked thread…", cx);
         cx.notify();
 
-        let gen_model = self.store.data.settings.text_generation_model.clone().unwrap_or_else(|| {
-            crate::store::TextGenerationModel {
-                harness: snapshot.harness,
-                id: snapshot.model.clone().unwrap_or_default(),
-            }
-        });
-        let env = self.harness_model_env(gen_model.harness).ok();
+        let generator = self.summary_model(snapshot.harness, snapshot.model.clone())
+            .and_then(|model| Some((self.harness_model_env(model.harness).ok()?, model)));
         let system = "Summarize the following coding-session conversation concisely as a handoff brief for a fresh linked session. \
                       Preserve the user's goal, key decisions, modified or relevant file paths, symbol names, errors/blockers, and clear next steps.";
         let session_id = id.to_string();
         cx.spawn_in(window, async move |this, cx| {
-            let summary = if let Some(env) = env {
+            let summary = if let Some((env, gen_model)) = generator {
                 let timeout = cx.background_executor().timer(std::time::Duration::from_secs(60));
                 match crate::harness::text_generation::complete(&gen_model, env, system, &transcript, timeout).await {
                     Ok(text) if !text.trim().is_empty() => text.trim().to_string(),

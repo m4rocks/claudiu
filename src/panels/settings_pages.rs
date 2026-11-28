@@ -276,14 +276,15 @@ impl Workspace {
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
         let access = subagents.access(harness);
         let key = harness.key();
+        let refusal = harness.adapter().capabilities.subagent.refusal();
         let mut controls = div().flex().flex_col().gap(px(8.0)).child(switch_row(
             SharedString::from(format!("agent-dialog-{key}-on")),
             "Allow subagent delegation",
-            Some("Let other sessions delegate background tasks to this harness".into()),
-            access.on,
+            Some(refusal.unwrap_or("Let other sessions delegate background tasks to this harness").into()),
+            access.on && refusal.is_none(),
             move |ws, _, cx| flip_subagent(ws, harness, cx),
             cx,
-        ));
+        ).disabled(refusal.is_some()));
         if let Some(warning) = harness.agent().and_then(|agent| agent.provider().warning) {
             controls = controls.child(warn(warning));
         }

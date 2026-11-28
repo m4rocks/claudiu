@@ -132,15 +132,10 @@ impl Workspace {
     }
 
     pub(crate) fn sign_in_to_harness(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
-        let (program, args): (&str, &[&str]) = match harness {
-            Harness::Claude => ("claude", &["auth", "login"]),
-            Harness::Codex => ("codex", &["login"]),
-            Harness::OpenCode => ("opencode", &["auth", "login"]),
-            Harness::Antigravity => ("agy", &[]),
-        };
-        let configured = (harness == Harness::Claude).then(|| self.claude_exe.clone()).flatten();
+        let crate::harness::SignIn { program, locate, args, .. } = harness.adapter().sign_in;
+        let configured = self.executable(harness).map(std::path::Path::to_path_buf);
         cx.spawn_in(window, async move |this, cx| {
-            let executable = cx.background_executor().spawn(async move { configured.or_else(|| crate::harness::find(program)) }).await;
+            let executable = cx.background_executor().spawn(async move { locate(configured.as_deref()) }).await;
             let _ = this.update_in(cx, |ws, window, cx| {
                 let Some(executable) = executable else {
                     ws.show_toast(format!("{program} was not found. Install its CLI to sign in."), Some(("Check setup".into(), Act::OpenSetup)), cx);

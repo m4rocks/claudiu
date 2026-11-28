@@ -393,8 +393,9 @@ pub struct Live {
     pub id: Id,
     pub view: SessionView,
     pub _sub: Subscription,
-    /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
-    pub claude_name: Option<String>,
+    /// The session name the agent's own records were last given (Claude Code's `--name` or `/rename`), so a changed
+    /// title is sent once.
+    pub native_name: Option<String>,
 }
 
 /// What a session is drawn as: a harness session's conversation, or the terminal of a shell tab (a sign-in).
@@ -535,7 +536,8 @@ pub struct QuestionPopover {
 
 pub struct Workspace {
     pub store: Store,
-    pub claude_exe: Option<PathBuf>,
+    /// Each agent's executable, as its adapter found it (`discover_executables`).
+    pub executables: harness::HarnessMap<Option<PathBuf>>,
     /// The ACP server every harness session starts, in place of the harness's own. Tests stand in a fake agent.
     pub acp_server: Option<(PathBuf, Vec<String>)>,
     pub shell: (String, Vec<String>),
@@ -615,7 +617,8 @@ pub struct Workspace {
     /// Per-harness usage limits probe state (in-flight flag, last error, backoff, queued refresh).
     pub limits_state: crate::harness::HarnessMap<ingest::LimitsState>,
     /// Last time Codex's fast local rollout-log watcher ran.
-    pub codex_logs_asked: Option<std::time::Instant>,
+    /// When each adapter's cheap local usage reading was last taken.
+    pub live_usage_asked: harness::HarnessMap<Option<std::time::Instant>>,
     pub editors: Vec<(Editor, bool)>,
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
@@ -671,8 +674,8 @@ pub struct Workspace {
     pub(crate) idle_since: HashMap<Id, std::time::Instant>,
     /// Last `ThreadView::turn_seq` for which a "finished" notification already fired, so one turn notifies at most once.
     pub(crate) notified_turn: HashMap<Id, u64>,
-    /// Claude Code's own busy/idle/waiting per session id, from the last activity poll.
-    pub(crate) claude_statuses: HashMap<String, String>,
+    /// Each agent's own busy/idle/waiting per session id (`NativeSessions::statuses`), from the last activity poll.
+    pub(crate) native_statuses: HashMap<String, String>,
     pub git_busy: Option<GitOp>,
     /// Sessions currently switching into a target worktree folder; shown as a spinner in the branch switcher chip.
     pub switching_worktree: HashMap<Id, PathBuf>,
@@ -690,7 +693,6 @@ impl Workspace {
     ) -> Self {
         let store = Store::load(Store::default_path());
         crate::panels::scale::set(store.data.settings.scale.unwrap_or(100));
-        let claude_exe = (Harness::Claude.adapter().discover)(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
         cx.subscribe_in(&search_input, window, |ws: &mut Self, input, ev: &InputEvent, window, cx| {
@@ -714,7 +716,7 @@ impl Workspace {
         let home_effort = store.data.settings.new_session.effort;
         let home_permission = store.data.settings.new_session.permission_mode;
         let mut ws = Self {
-            claude_exe,
+            executables: Default::default(),
             acp_server: None,
             shell: platform::default_shell(store.data.settings.shell.as_deref()),
             live: vec![],
@@ -778,7 +780,7 @@ impl Workspace {
             closed: vec![],
             model_lookups: Default::default(),
             limits_state: Default::default(),
-            codex_logs_asked: None,
+            live_usage_asked: Default::default(),
             editors: Editor::ALL
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))
@@ -822,7 +824,7 @@ impl Workspace {
             activity: HashMap::new(),
             idle_since: HashMap::new(),
             notified_turn: HashMap::new(),
-            claude_statuses: HashMap::new(),
+            native_statuses: HashMap::new(),
             git_busy: None,
             switching_worktree: HashMap::new(),
             pending: None,
@@ -840,6 +842,7 @@ impl Workspace {
         for path in initial_projects {
             ws.store.add_project(&path);
         }
+        ws.discover_executables(cx);
         ws.refresh_git_async(cx);
         cx.background_executor().spawn(async { lifecycle::tidy_leftovers() }).detach();
         ws.ingest_usage(cx);

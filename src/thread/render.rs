@@ -17,6 +17,7 @@ use gpui::{AppContext, Entity};
 
 use super::{ThreadEvent, ThreadPicker, ThreadView, elements};
 use crate::harness::CatalogModel;
+use crate::harness::capabilities::{Initiator, handoff};
 use crate::harness::permission::Permission;
 use super::timeline::{self, RunKind};
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
@@ -1133,6 +1134,7 @@ impl ThreadView {
                         None => m.harness == current_harness && current_id.as_deref() == Some(m.id.as_str()),
                     },
                     |_| None,
+                    move |h| handoff(current_harness, h, Initiator::User).refusal(),
                     |v, choice, window, cx| {
                         v.pick_model(choice, cx);
                         v.close_picker(window, cx);

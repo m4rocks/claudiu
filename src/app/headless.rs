@@ -72,7 +72,7 @@ mod skills;
 impl Workspace {
     pub(crate) fn start_screenshot_session(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.acp_server = Some(fake_agent(&cwd));
-        self.claude_exe = Some("offline-screenshot-agent".into());
+        *self.executables.get_mut(crate::harness::Harness::Claude) = Some("offline-screenshot-agent".into());
         self.new_session_from_home(Harness::Claude, None, cwd, None, None, None, window, cx);
         if let Some(id) = self.active_id().cloned() {
             if let Some(record) = self.store.session_mut(&id) {

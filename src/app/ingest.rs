@@ -1,20 +1,19 @@
-//! Taking in what other processes left in the data folder: the per-process mod's usage snapshots (limits, context,
-//! settings), and the links and GitHub items sessions asked for. Reading the files is
+//! Taking in what other processes left in the data folder: the reports agents write outside ACP (limits, context,
+//! settings; Claude Code's mod writes them), and the links and GitHub items sessions asked for. Reading the files is
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::harness::claude::usage::Snapshot;
-use crate::harness::limits::{Pool, has_expired_window, merge_pools, merge_usage};
-use crate::store::{RateLimit, UsageLimits};
+use crate::harness::capabilities::{Initiator, handoff};
+use crate::harness::SessionReport;
+use crate::harness::limits::{Pool, has_expired_window};
+use crate::store::UsageLimits;
 
 /// Retry delay after a failed usage-limits probe, matching t3code's 30s recovery backoff.
 const FAILED_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// Minimum gap between automatic probes triggered by a window crossing its `resets_at` boundary.
 const RESET_RETRY_DELAY: Duration = Duration::from_secs(30);
-/// Fast local check cadence for Codex rollout logs (zero network / zero subprocesses).
-const CODEX_LOG_POLL: Duration = Duration::from_secs(3);
 
 /// Per-harness background probe state for usage limits.
 #[derive(Clone, Debug, Default)]
@@ -38,12 +37,18 @@ impl Workspace {
     pub(super) fn ingest_usage(&mut self, cx: &mut Context<Self>) {
         if !cfg!(test) {
             self.ingest_limits(cx);
-            self.ingest_codex_logs(cx);
+            self.ingest_live_usage(cx);
         }
         self.in_background(
-            || (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()),
-            |ws, (snaps, items), cx| {
-                let mut changed = snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap, cx) | c);
+            || {
+                let reports: Vec<(Harness, SessionReport)> = Harness::registered()
+                    .filter_map(|harness| Some((harness, harness.adapter().reports?)))
+                    .flat_map(|(harness, read)| read().into_iter().map(move |report| (harness, report)))
+                    .collect();
+                (reports, mcp::read_attached())
+            },
+            |ws, (reports, items), cx| {
+                let mut changed = reports.iter().fold(false, |c, (harness, report)| ws.apply_report(*harness, report, cx) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
@@ -61,36 +66,34 @@ impl Workspace {
 
     /// Whether any stored window for `harness` has crossed its `resets_at` boundary.
     fn harness_has_expired_window(&self, harness: Harness, now: i64) -> bool {
-        match harness {
-            Harness::Claude => has_expired_window(&self.store.data.claude_usage, now),
-            Harness::Codex | Harness::Antigravity => {
-                let Some(key) = harness.agent().map(|a| a.provider().key) else { return false };
-                self.store
-                    .data
-                    .subagent_limits
-                    .get(key)
-                    .is_some_and(|pools| pools.iter().any(|p| has_expired_window(&p.usage, now)))
-            }
-            Harness::OpenCode => false,
-        }
+        harness.adapter().usage.is_some() && self.stored_pools(harness).iter().any(|p| has_expired_window(&p.usage, now))
     }
 
-    /// Active zero-token probes for Claude, Codex, and Antigravity.
+    /// The stored limits for `harness`.
+    fn stored_pools(&self, harness: Harness) -> Vec<Pool> {
+        self.store.data.usage_pools(harness)
+    }
+
+    /// Merges `pools` into the stored limits for `harness`. Returns whether anything changed: a report is read again
+    /// every tick, so an unconditional save would rewrite state.json every few seconds.
+    fn store_pools(&mut self, harness: Harness, pools: Vec<Pool>) -> bool {
+        let changed = self.store.data.merge_usage_pools(harness, pools);
+        if changed {
+            self.store.mark_dirty();
+        }
+        changed
+    }
+
+    /// Active zero-token probes, on each adapter's own cadence.
     fn ingest_limits(&mut self, cx: &mut Context<Self>) {
         let now_instant = Instant::now();
         let now_unix = crate::store::now();
-        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+        for harness in Harness::registered() {
+            let Some(usage) = &harness.adapter().usage else { continue };
             if !self.limits_harness_active(harness) {
                 continue;
             }
-            let every = match harness {
-                Harness::Claude => crate::harness::claude::limits::REFRESH_EVERY,
-                Harness::Codex | Harness::Antigravity => {
-                    let Some(limits) = harness.agent().and_then(|a| a.provider().limits.as_ref()) else { continue };
-                    limits.every
-                }
-                Harness::OpenCode => continue,
-            };
+            let every = usage.every;
             let state = self.limits_state.get(harness);
             if state.loading || state.authentication_required {
                 continue;
@@ -107,60 +110,41 @@ impl Workspace {
         }
     }
 
-    /// Fast zero-cost local watcher for Codex rollout logs so mid-turn updates appear within seconds.
-    fn ingest_codex_logs(&mut self, cx: &mut Context<Self>) {
-        if !self.limits_harness_active(Harness::Codex) {
-            return;
+    /// The adapters' cheap local readings, such as Codex's rollout logs, so mid-turn updates appear within seconds.
+    fn ingest_live_usage(&mut self, cx: &mut Context<Self>) {
+        for harness in Harness::registered() {
+            let Some(crate::harness::LiveUsage { read, every }) = harness.adapter().usage.as_ref().and_then(|usage| usage.live) else { continue };
+            if !self.limits_harness_active(harness) || self.live_usage_asked.get(harness).is_some_and(|at| at.elapsed() < every) {
+                continue;
+            }
+            *self.live_usage_asked.get_mut(harness) = Some(Instant::now());
+            self.in_background(
+                read,
+                move |ws, usage, cx| {
+                    if let Some(usage) = usage {
+                        ws.apply_live_limits(harness, usage, cx);
+                    }
+                },
+                cx,
+            );
         }
-        if self.codex_logs_asked.is_some_and(|at| at.elapsed() < CODEX_LOG_POLL) {
-            return;
-        }
-        self.codex_logs_asked = Some(Instant::now());
-        self.in_background(
-            || crate::harness::codex::limits::codex_home().and_then(|home| crate::harness::codex::limits::read(&home)),
-            |ws, usage, cx| {
-                if let Some(usage) = usage {
-                    ws.apply_live_limits(Harness::Codex, usage, cx);
-                }
-            },
-            cx,
-        );
     }
 
     fn spawn_limits_probe(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        let Some(usage) = &harness.adapter().usage else { return };
+        let read = usage.read;
         let state = self.limits_state.get_mut(harness);
         state.loading = true;
         state.queued = false;
         state.last_asked = Some(Instant::now());
         state.retry_after = None;
         cx.notify();
-
-        match harness {
-            Harness::Claude => {
-                let Some(claude_exe) = self.claude_exe.clone() else {
-                    self.finish_limits_probe(Harness::Claude, Err("Could not find the `claude` CLI on PATH.".into()), cx);
-                    return;
-                };
-                self.in_background(
-                    move || {
-                        let usage = crate::harness::claude::limits::read(&claude_exe)?;
-                        Ok(vec![Pool { name: "Claude".into(), usage }])
-                    },
-                    |ws, read, cx| ws.finish_limits_probe(Harness::Claude, read, cx),
-                    cx,
-                );
-            }
-            Harness::Codex | Harness::Antigravity => {
-                let Some(agent) = harness.agent() else { return };
-                let Some(limits) = &agent.provider().limits else { return };
-                self.in_background(
-                    limits.read,
-                    move |ws, read, cx| ws.finish_limits_probe(harness, read, cx),
-                    cx,
-                );
-            }
-            Harness::OpenCode => {}
-        }
+        let executable = self.executable(harness).map(std::path::Path::to_path_buf);
+        self.in_background(
+            move || read(executable.as_deref()),
+            move |ws, read, cx| ws.finish_limits_probe(harness, read, cx),
+            cx,
+        );
     }
 
     fn finish_limits_probe(&mut self, harness: Harness, read: Result<Vec<Pool>, String>, cx: &mut Context<Self>) {
@@ -173,24 +157,12 @@ impl Workspace {
                 state.error = None;
                 state.authentication_required = false;
                 state.retry_after = None;
-                match harness {
-                    Harness::Claude => {
-                        if let Some(pool) = pools.into_iter().next() {
-                            self.merge_claude_usage(pool.usage.five_hour, pool.usage.seven_day);
-                        }
-                    }
-                    Harness::Codex | Harness::Antigravity => {
-                        if let Some(key) = harness.agent().map(|a| a.provider().key) {
-                            self.apply_subagent_limits(key, Ok(pools));
-                        }
-                    }
-                    Harness::OpenCode => {}
-                }
+                self.store_pools(harness, pools);
                 self.notify_threads_usage(harness, cx);
             }
             Err(err) => {
                 state.authentication_required = crate::harness::acp::looks_like_auth_error(&err);
-                state.error = Some(if state.authentication_required { format!("Usage is stale. {}", crate::harness::acp::login_hint(harness)) } else { err });
+                state.error = Some(if state.authentication_required { format!("Usage is stale. {}", harness.adapter().sign_in.session_hint) } else { err });
                 state.retry_after = (!state.authentication_required).then(|| Instant::now() + FAILED_RETRY_DELAY);
             }
         }
@@ -202,72 +174,36 @@ impl Workspace {
 
     /// Merge live streamed limits (e.g. from `bridge/claude.mjs` or Codex rollout logs) immediately.
     pub(crate) fn apply_live_limits(&mut self, harness: Harness, usage: UsageLimits, cx: &mut Context<Self>) {
-        let changed = match harness {
-            Harness::Claude => self.merge_claude_usage(usage.five_hour, usage.seven_day),
-            Harness::Codex => {
-                let current = self.store.data.subagent_limits.get("codex").cloned().unwrap_or_default();
-                let merged = merge_pools(&current, vec![Pool { name: "Codex".into(), usage }]);
-                if merged != current {
-                    self.store.data.subagent_limits.insert("codex".into(), merged);
-                    self.store.mark_dirty();
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
-        if changed {
-            let state = self.limits_state.get_mut(harness);
-            state.error = None;
-            state.authentication_required = false;
-            state.retry_after = None;
-            self.notify_threads_usage(harness, cx);
-            cx.notify();
+        if harness.adapter().usage.is_none() || !self.store_pools(harness, vec![Pool { name: harness.name().into(), usage }]) {
+            return;
         }
+        let state = self.limits_state.get_mut(harness);
+        state.error = None;
+        state.authentication_required = false;
+        state.retry_after = None;
+        self.notify_threads_usage(harness, cx);
+        cx.notify();
     }
 
-    /// The stored usage limits for `harness` (and optional `model_id` for multi-pool providers like Antigravity).
+    /// The stored usage limits for `harness`, for an adapter that reports them. `_model_id` picks the pool for one model
+    /// once an adapter splits its limits by model.
     pub(crate) fn usage_for_harness_model(&self, harness: Harness, _model_id: Option<&str>) -> Option<UsageLimits> {
-        match harness {
-            Harness::Claude => Some(self.store.data.claude_usage.clone()),
-            Harness::Codex => self.store.data.subagent_limits.get("codex")?.first().map(|p| p.usage.clone()),
-            /* Temporarily ignore cached Antigravity limits while polling is disabled.
-            Harness::Antigravity => {
-                let pools = self.store.data.subagent_limits.get("antigravity")?;
-                if let Some(model) = _model_id.map(str::to_ascii_lowercase) {
-                    let wants_claude = model.contains("claude") || model.contains("gpt") || model.contains("opus") || model.contains("sonnet");
-                    if let Some(pool) = pools.iter().find(|p| {
-                        let name = p.name.to_ascii_lowercase();
-                        if wants_claude {
-                            name.contains("claude") || name.contains("gpt")
-                        } else {
-                            name.contains("gemini")
-                        }
-                    }) {
-                        return Some(pool.usage.clone());
-                    }
-                }
-                pools.first().map(|p| p.usage.clone())
-            }
-            */
-            Harness::OpenCode | Harness::Antigravity => None,
-        }
+        harness.adapter().usage.as_ref()?;
+        self.stored_pools(harness).into_iter().next().map(|pool| pool.usage)
     }
 
     fn harness_probably_available(&self, harness: Harness) -> bool {
         if !harness.is_registered() {
             return false;
         }
-        match harness {
-            Harness::Claude => self.claude_exe.is_some(),
-            Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
-                // Available if we have a cached model catalog or usage reading for it, or its CLI is on PATH.
-                let has_models = self.store.data.settings.aggregated_models().iter().any(|m| m.harness == harness && !m.id.is_empty());
-                let has_limits = harness.agent().is_some_and(|a| self.store.data.subagent_limits.contains_key(a.provider().key));
-                has_models || has_limits
-            }
+        // An adapter whose executable Settings can point at is found before anything runs, so its answer is final.
+        // The others are found in the background, so until then a cached model catalog or usage reading counts.
+        if harness.adapter().custom_path || self.executable(harness).is_some() {
+            return self.executable(harness).is_some();
         }
+        let has_models = self.store.data.settings.aggregated_models().iter().any(|m| m.harness == harness && !m.id.is_empty());
+        let has_limits = self.store.data.subagent_limits.contains_key(harness.key());
+        has_models || has_limits
     }
 
     /// Pick the best available fallback model from another enabled harness that is not at its usage limit.
@@ -288,8 +224,9 @@ impl Workspace {
                 })
                 .unwrap_or(0.0)
         };
+        let may_take_over = |h: Harness| h != excluded && handoff(excluded, h, Initiator::Automatic).allowed();
         if let Some(pref) = &self.store.data.settings.auto_handoff_model
-            && pref.harness != excluded
+            && may_take_over(pref.harness)
             && enabled.contains(&pref.harness)
             && self.harness_probably_available(pref.harness)
             && max_util(pref.harness, (!pref.id.is_empty()).then_some(pref.id.as_str())) < 0.95
@@ -302,7 +239,7 @@ impl Workspace {
         }
         let mut candidates: Vec<(f32, crate::harness::CatalogModel)> = enabled
             .into_iter()
-            .filter(|&h| h != excluded && self.harness_probably_available(h))
+            .filter(|&h| may_take_over(h) && self.harness_probably_available(h))
             .filter_map(|h| {
                 let model = all.iter().find(|m| m.harness == h).cloned().unwrap_or_else(|| {
                     crate::harness::CatalogModel { harness: h, id: String::new(), name: h.name().into() }
@@ -340,7 +277,7 @@ impl Workspace {
     /// Request a fresh usage-limits probe for `harness` (e.g. after a turn finishes).
     pub(crate) fn request_limits_refresh(&mut self, harness: Harness, cx: &mut Context<Self>) {
         if self.limits_state.get(harness).authentication_required { return; }
-        if !matches!(harness, Harness::Claude | Harness::Codex) || !self.limits_harness_active(harness) {
+        if !harness.adapter().usage.as_ref().is_some_and(|usage| usage.after_turn) || !self.limits_harness_active(harness) {
             return;
         }
         if self.limits_state.get(harness).loading {
@@ -352,10 +289,10 @@ impl Workspace {
 
     /// Manual refresh triggered from the sidebar usage footer.
     pub(crate) fn refresh_all_limits(&mut self, cx: &mut Context<Self>) {
-        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+        for harness in Harness::registered() {
             self.limits_state.get_mut(harness).authentication_required = false;
         }
-        for harness in [Harness::Claude, Harness::Codex] {
+        for harness in Harness::registered().filter(|harness| harness.adapter().usage.is_some()) {
             if !self.limits_harness_active(harness) {
                 continue;
             }
@@ -367,31 +304,21 @@ impl Workspace {
         }
     }
 
-    pub(super) fn apply_subagent_limits(&mut self, key: &str, read: Result<Vec<Pool>, String>) {
-        if let Ok(pools) = read {
-            let current = self.store.data.subagent_limits.get(key).cloned().unwrap_or_default();
-            let merged = merge_pools(&current, pools);
-            if merged != current {
-                self.store.data.subagent_limits.insert(key.into(), merged);
-                self.store.mark_dirty();
-            }
-        }
-    }
-
-    /// One mod report: Claude's limits, and the session's own figures and settings.
-    fn apply_snapshot(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
-        let mut changed = self.merge_claude_usage(snap.five_hour.clone(), snap.seven_day.clone());
+    /// One report from `harness`: its limits, and the session's own figures and settings.
+    fn apply_report(&mut self, harness: Harness, report: &SessionReport, cx: &mut Context<Self>) -> bool {
+        let usage = UsageLimits { five_hour: report.five_hour.clone(), seven_day: report.seven_day.clone() };
+        let mut changed = self.store_pools(harness, vec![Pool { name: harness.name().into(), usage }]);
         if changed {
-            self.notify_threads_usage(Harness::Claude, cx);
+            self.notify_threads_usage(harness, cx);
         }
         let id = self.store.data.sessions.iter().find(|s| {
-            s.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude && meta.session_id == snap.session_id)
+            s.agent.as_ref().is_some_and(|meta| meta.harness == harness && meta.session_id == report.session_id)
         }).map(|s| s.id.clone());
         if let Some(id) = id {
             if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.agent.as_mut()) {
-                changed |= apply_to_meta(meta, snap);
+                changed |= apply_to_meta(meta, report);
             }
-            if let Some(native) = snap.auto_compact
+            if let Some(native) = report.auto_compact
                 && let Some(view) = self.live_view(&id).and_then(|v| v.thread())
             {
                 view.update(cx, |view, cx| {
@@ -404,21 +331,10 @@ impl Workspace {
         }
         changed
     }
-
-    /// Keep the newest reading per window. Returns whether anything changed (the same snapshot is re-read
-    /// every tick, so an unconditional save would rewrite state.json every few seconds).
-    pub(super) fn merge_claude_usage(&mut self, five: Option<RateLimit>, seven: Option<RateLimit>) -> bool {
-        let incoming = UsageLimits { five_hour: five, seven_day: seven };
-        let changed = merge_usage(&mut self.store.data.claude_usage, &incoming);
-        if changed {
-            self.store.mark_dirty();
-        }
-        changed
-    }
 }
 
-/// Copy a snapshot's figures onto the session's record; true when anything differed.
-fn apply_to_meta(meta: &mut AgentMeta, snap: &Snapshot) -> bool {
+/// Copy a report's figures onto the session's record; true when anything differed.
+fn apply_to_meta(meta: &mut AgentMeta, snap: &SessionReport) -> bool {
     let mut changed = false;
     if snap.context_fraction.is_some() && (meta.context_fraction != snap.context_fraction || meta.context_window != snap.context_window) {
         meta.context_fraction = snap.context_fraction;
@@ -468,7 +384,7 @@ fn apply_to_meta(meta: &mut AgentMeta, snap: &Snapshot) -> bool {
 mod tests {
     use super::*;
 
-    fn snap(json: &str) -> Snapshot {
+    fn snap(json: &str) -> SessionReport {
         serde_json::from_str(json).unwrap()
     }
 

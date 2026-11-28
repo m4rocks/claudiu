@@ -120,9 +120,30 @@ impl Workspace {
         }
     }
 
+    /// `harness`'s executable, as its adapter last found it.
+    pub fn executable(&self, harness: Harness) -> Option<&std::path::Path> {
+        self.executables.get(harness).as_deref()
+    }
+
+    /// Finds each agent's executable again, at start and after its path in Settings changed. One whose path Settings
+    /// holds is found at once, since sessions need it before anything else runs; the others are found in the
+    /// background, where looking can mean starting a login shell to read its PATH.
+    pub(super) fn discover_executables(&mut self, cx: &mut Context<Self>) {
+        for harness in Harness::registered() {
+            let adapter = harness.adapter();
+            if adapter.custom_path {
+                *self.executables.get_mut(harness) = (adapter.discover)(self.store.data.settings.executable_path(harness));
+            } else if !cfg!(test) {
+                // Tests stand in a fake agent for these and shouldn't look at the machine's PATH.
+                let discover = adapter.discover;
+                self.in_background(move || discover(None), move |ws, found, _| *ws.executables.get_mut(harness) = found, cx);
+            }
+        }
+    }
+
     /// Environment passed to `harness`'s ACP server when probing its available models.
     pub(super) fn harness_model_env(&self, harness: Harness) -> Result<Vec<(String, String)>, String> {
-        (harness.adapter().probe_env)(self.claude_exe.as_deref())
+        (harness.adapter().probe_env)(self.executable(harness))
     }
 
     /// Refreshes model catalogs in the background for every enabled harness (Claude Code, Codex, OpenCode,
