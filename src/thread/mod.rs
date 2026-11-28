@@ -253,6 +253,7 @@ impl ComposerState {
 
 /// How to bring a session up.
 pub struct Start {
+    pub skills_ready: Option<futures::future::Shared<gpui::Task<Vec<String>>>>,
     /// m4code's session record id, used to persist conversation entries across restarts.
     pub record_id: String,
     pub harness: Harness,
@@ -803,6 +804,13 @@ impl ThreadView {
     fn start(&mut self, mut start: Start, cx: &mut Context<Self>) {
         let harness = start.harness;
         cx.spawn(async move |this, cx| {
+            if let Some(ready) = start.skills_ready.take() {
+                let errors = ready.await;
+                if let Some(error) = errors.first() {
+                    let _ = this.update(cx, |v, cx| v.ended(Some(format!("Couldn't sync skills: {error}")), cx));
+                    return;
+                }
+            }
             let record = start.record_id.clone();
             let restore = start.session_id.is_some() && start.prior_entries.is_empty();
             let (entries, reviews, timestamps, notices) = cx.background_executor().spawn(async move {
@@ -1060,12 +1068,24 @@ impl ThreadView {
 
     /// Replace only the underlying harness session in `folder`, keeping this `ThreadView`, its composer state,
     /// cursor position, scroll state, and sidebar slot intact. If launching the new harness session fails, the
-    /// existing connection stays active and `ThreadEvent::WorktreeSwitchFailed` is emitted.
+    /// original checkout is retained and `ThreadEvent::WorktreeSwitchFailed` is emitted. Codex must
+    /// release its exclusive native-session lock first; a failed switch reconnects the original session.
     pub(crate) fn switch_worktree_session(&mut self, mut start: Start, folder: PathBuf, seeded_notice: bool, cx: &mut Context<Self>) {
         let harness = start.harness;
+        let original_cwd = self.cwd.clone();
+        let exclusive = harness == Harness::Codex && start.session_id.is_some();
         cx.spawn(async move |this, cx| {
-            let fail = |this: &gpui::WeakEntity<Self>, folder: PathBuf, error: String, cx: &mut gpui::AsyncApp| {
+            let fail = |this: &gpui::WeakEntity<Self>, folder: PathBuf, error: String, mut start: Start, cx: &mut gpui::AsyncApp| {
                 let _ = this.update(cx, |v, cx| {
+                    if exclusive && v.connection.is_none() {
+                        start.cwd = original_cwd.clone();
+                        start.session_id = v.session_id.clone();
+                        start.prompt = None;
+                        if let Some(tools) = &mut start.mcp_tools { tools.set_workspace(&original_cwd); tools.renew(); }
+                        v.persist_entries();
+                        v.phase = Phase::Starting;
+                        v.start(start, cx);
+                    }
                     v.hold_workspace_switch(false, cx);
                     cx.emit(ThreadEvent::WorktreeSwitchFailed { folder, error });
                 });
@@ -1078,7 +1098,30 @@ impl ThreadView {
                 match startup_deadline("reading the workspace", task, cx).await {
                     Ok(tools) => start.mcp_tools = Some(tools),
                     Err(error) => {
-                        fail(&this, folder, error, cx);
+                        fail(&this, folder, error, start, cx);
+                        return;
+                    }
+                }
+            }
+            if let Some(ready) = start.skills_ready.take() {
+                let errors = ready.await;
+                if let Some(error) = errors.first() {
+                    fail(&this, folder, format!("Couldn't sync skills: {error}"), start, cx);
+                    return;
+                }
+            }
+            // Codex owns a native session exclusively. Invalidate the old event loop before
+            // closing stdin, then wait off the UI thread until the process has released its lock.
+            if exclusive {
+                let old = this.update(cx, |v, _| {
+                    v.connection_gen = v.connection_gen.wrapping_add(1);
+                    v.events = None;
+                    v.connection.take()
+                }).ok().flatten();
+                if let Some(old) = old {
+                    let stopped = old.terminate_and_wait();
+                    if let Err(error) = stopped.await {
+                        fail(&this, folder, error, start, cx);
                         return;
                     }
                 }
@@ -1097,14 +1140,14 @@ impl ThreadView {
                 if let Some(tools) = &start.mcp_tools
                     && let Err(error) = (harness.adapter().configure_mcp)(tools, &mut plan)
                 {
-                    fail(&this, folder, error, cx);
+                    fail(&this, folder, error, start, cx);
                     return;
                 }
                 let launched = startup_deadline("launch", launch_session(&start, &plan, full_access, events.clone(), cx), cx).await;
                 let connection = match launched {
                     Ok(c) => Rc::new(c),
                     Err(why) => {
-                        fail(&this, folder, why, cx);
+                        fail(&this, folder, why, start, cx);
                         return;
                     }
                 };
@@ -1120,7 +1163,7 @@ impl ThreadView {
                     if Permission::Auto.listed(harness, &probe.modes).is_none()
                         && Permission::FullAccess.listed(harness, &probe.modes).is_some()
                     {
-                        connection.terminate();
+                        let _ = connection.terminate_and_wait().await;
                         if let Some(tools) = &mut start.mcp_tools {
                             tools.renew();
                         }
@@ -1131,8 +1174,8 @@ impl ThreadView {
                 match opened {
                     Ok(opened) => break (connection, events, incoming, opened),
                     Err(why) => {
-                        connection.terminate();
-                        fail(&this, folder, why, cx);
+                        let _ = connection.terminate_and_wait().await;
+                        fail(&this, folder, why, start, cx);
                         return;
                     }
                 }
@@ -1210,16 +1253,16 @@ impl ThreadView {
                 if let Err(why) = applied
                     && (wanted == Permission::ReadOnly || reported_modes || matches!(start.starter, Starter::Handoff | Starter::OtherSession) || full_access)
                 {
-                    connection.terminate();
-                    fail(&this, folder, why, cx);
+                    let _ = connection.terminate_and_wait().await;
+                    fail(&this, folder, why, start, cx);
                     return;
                 }
             }
-            if let Some(tools) = start.mcp_tools.take().filter(|t| start.server.is_none() && t.can_signal_ready())
+            if let Some(tools) = start.mcp_tools.as_ref().filter(|t| start.server.is_none() && t.can_signal_ready())
                 && let Err(why) = wait_for_mcp(&tools.ready).await
             {
-                connection.terminate();
-                fail(&this, folder, why, cx);
+                let _ = connection.terminate_and_wait().await;
+                fail(&this, folder, why, start, cx);
                 return;
             }
             let conn_gen = this
@@ -4023,11 +4066,109 @@ mod tests {
 
     fn test_start(cwd: std::path::PathBuf, harness: Harness) -> super::Start {
         super::Start {
+            skills_ready: None,
             record_id: String::new(), harness, all_models: vec![], picked: vec![], cwd,
             env: vec![], mcp_servers: vec![], mcp_tools: None, launch_args: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[test]
+    fn codex_worktree_switch_releases_session_lock_and_rolls_back_on_failure() {
+        use futures::FutureExt;
+        std::thread::spawn(|| {
+            crate::datadir::use_throwaway_folders();
+            let work = tempfile::tempdir().unwrap();
+            let original = work.path().join("original");
+            let target = work.path().join("target");
+            let rejected = work.path().join("rejected");
+            for dir in [&original, &target, &rejected] { std::fs::create_dir_all(dir).unwrap(); }
+            let script = work.path().join("exclusive.py");
+            std::fs::write(&script, r#"import json, sys, os, time
+lock = __file__ + '.lock'
+owned = False
+def send(i, result=None, error=None):
+    msg = {'jsonrpc': '2.0', 'id': i}
+    msg['error' if error else 'result'] = error or result or {}
+    print(json.dumps(msg), flush=True)
+try:
+    for line in sys.stdin:
+        m = json.loads(line)
+        if 'id' not in m or 'method' not in m: continue
+        method, i = m['method'], m['id']
+        if method == 'initialize':
+            if not os.path.exists(__file__ + '.skills-ready'):
+                send(i, error={'code': -32600, 'message': 'skills not ready before launch'})
+                continue
+            send(i, {'agentCapabilities': {'loadSession': True}})
+        elif method in ['session/new', 'session/load']:
+            if m['params']['cwd'].endswith('rejected'):
+                send(i, error={'code': -32600, 'message': 'test rejected target'})
+                continue
+            try:
+                os.mkdir(lock)
+                owned = True
+            except FileExistsError:
+                send(i, error={'code': -32600, 'message': 'session in use by another client'})
+                continue
+            send(i, {'sessionId': 'exclusive-session', 'cwd': m['params']['cwd']})
+        else: send(i)
+finally:
+    if owned:
+        time.sleep(0.2)
+        os.rmdir(lock)
+"#).unwrap();
+            let server = (std::path::PathBuf::from("python3"), vec![script.to_string_lossy().into_owned()]);
+            let mut app = gpui::TestAppContext::single();
+            app.update(gpui_kit::init);
+            let mut start = test_start(original.clone(), Harness::Codex);
+            start.record_id = "exclusive-switch-test".into();
+            start.server = Some(server.clone());
+            let marker = script.with_extension("py.skills-ready");
+            start.skills_ready = Some(app.update(|cx| cx.background_executor().spawn(async move {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::fs::write(marker, "ready").unwrap();
+                Vec::new()
+            })).shared());
+            let (view, cx) = app.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+            let wait = |cx: &mut gpui::VisualTestContext, folder: &std::path::Path, released: bool| {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                loop {
+                    cx.run_until_parked();
+                    let ready = cx.update(|_, app| {
+                        let v = view.read(app);
+                        v.phase == super::Phase::Ready && v.cwd == folder && (!released || !v.is_workspace_switching())
+                    });
+                    if ready { break; }
+                    assert!(std::time::Instant::now() < until, "session failed to reconnect in {}", folder.display());
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            wait(cx, &original, false);
+            view.update(cx, |v, _| {
+                v.thread.entries.push(Entry::Agent("Keep this conversation".into()));
+                v.remeasure(0);
+            });
+            for (folder, expected, rollback) in [(&target, &target, false), (&rejected, &target, true)] {
+                let mut start = test_start(folder.clone(), Harness::Codex);
+                start.record_id = "exclusive-switch-test".into();
+                start.server = Some(server.clone());
+                start.session_id = Some("exclusive-session".into());
+                view.update(cx, |v, cx| {
+                    v.hold_workspace_switch(true, cx);
+                    v.switch_worktree_session(start, folder.clone(), false, cx);
+                });
+                wait(cx, expected, rollback);
+                view.update(cx, |v, cx| v.hold_workspace_switch(false, cx));
+            }
+            view.update(cx, |v, _| {
+                assert_eq!(v.session_id.as_deref(), Some("exclusive-session"));
+                assert!(v.thread.entries.contains(&Entry::Agent("Keep this conversation".into())));
+                assert_eq!(v.thread.entries.iter().filter(|e| matches!(e, Entry::WorkspaceBoundary(_))).count(), 1);
+                v.connection.as_ref().unwrap().terminate();
+            });
+        }).join().unwrap();
     }
 
     #[gpui::test]
@@ -5469,6 +5610,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
             env: vec![], mcp_servers: vec![], mcp_tools: None, launch_args: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
             prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
@@ -5488,6 +5630,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
             env: vec![], mcp_servers: vec![], mcp_tools: None, launch_args: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
             prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
@@ -5510,6 +5653,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(),
             harness: Harness::Claude,
             all_models: vec![],
@@ -5559,6 +5703,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(),
             harness: Harness::Codex,
             all_models: vec![],
@@ -5601,6 +5746,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(),
             harness: Harness::Claude,
             all_models: vec![],
@@ -5635,6 +5781,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(),
             harness: Harness::Claude,
             all_models: vec![],
@@ -5730,6 +5877,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
+            skills_ready: None,
             record_id: String::new(),
             harness: Harness::Claude,
             all_models: vec![],

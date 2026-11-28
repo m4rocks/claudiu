@@ -165,7 +165,8 @@ pub const ADAPTER: Adapter = Adapter {
     custom_path: false,
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".codex"),
-    project_skills: ".codex/skills",
+    global_skills: |home| home.join(".agents/skills"),
+    project_skills: ".agents/skills",
     hidden_commands: &["approvals", "logout", "resume", "fork", "mcp", "model", "permissions"],
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks {

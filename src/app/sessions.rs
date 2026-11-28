@@ -208,12 +208,13 @@ impl Workspace {
                 return None;
             }
         };
-        self.sync_skills(Some(meta.harness), cx);
+        let skills_ready = self.prepare_skills(Some(meta.harness), cx);
         let all_models = self.store.data.settings.aggregated_models();
         let picked = self.store.data.settings.picked_models(meta.harness).to_vec();
         let prior_entries = vec![];
         let inline_visuals = !self.store.data.settings.m4code_tools_off.contains(&mcp::Feature::Visual);
         Some(crate::thread::Start {
+            skills_ready,
             record_id: record_id.to_string(),
             harness: meta.harness,
             all_models,

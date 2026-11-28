@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use futures::FutureExt;
+
 use super::*;
 use crate::skills::registry::CatalogEntry;
 use crate::skills::{CatalogStatus, InstalledSkill, RepoSkill, active_harnesses, repo_skills, skills_root, sync_all, uninstall};
@@ -41,9 +43,10 @@ pub struct SkillsPage {
     pub installing: HashSet<String>,
     /// Skills the selected project's repository ships itself, keyed by that project's id.
     pub repo_skills: Option<(Id, Vec<RepoSkill>)>,
-    /// Serializes disk syncs and drops superseded snapshots so rapid toggles never apply out of order.
+    /// Invalidates queued snapshots when a package is uninstalled.
     sync_serial: Arc<AtomicU64>,
     sync_lock: Arc<Mutex<()>>,
+    sync_tail: Option<futures::future::Shared<gpui::Task<Vec<String>>>>,
     /// Injectable loaders so headless tests run without touching the network.
     pub fetch_popular: fn() -> Result<Vec<CatalogEntry>, String>,
     pub fetch_search: fn(&str) -> Result<Vec<CatalogEntry>, String>,
@@ -69,6 +72,7 @@ impl Default for SkillsPage {
             repo_skills: None,
             sync_serial: Arc::new(AtomicU64::new(0)),
             sync_lock: Arc::new(Mutex::new(())),
+            sync_tail: None,
             fetch_popular: crate::skills::registry::popular,
             fetch_search: crate::skills::registry::search,
             install_pkg: crate::skills::registry::install_from_github,
@@ -411,33 +415,38 @@ impl Workspace {
 
     /// Reconcile symlinks for every active harness (global and per-project) off the UI thread.
     pub(crate) fn sync_skills(&mut self, extra_harness: Option<Harness>, cx: &mut Context<Self>) {
-        let Some(home) = self.skills_home() else { return };
+        if let Some(task) = self.prepare_skills(extra_harness, cx) {
+            cx.spawn(async move |this, cx| {
+                let errors = task.await;
+                let _ = this.update(cx, |ws, cx| {
+                    if let Some(first) = errors.first() { ws.toast(format!("Couldn't sync skills: {first}"), cx); }
+                });
+            }).detach();
+        }
+    }
+
+    pub(crate) fn prepare_skills(&mut self, extra_harness: Option<Harness>, cx: &mut Context<Self>) -> Option<futures::future::Shared<gpui::Task<Vec<String>>>> {
+        let home = self.skills_home()?;
         let config = self.store.data.settings.skills.clone();
         let projects: Vec<(String, PathBuf)> = self.store.data.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
         let has_shared = projects.iter().any(|(_, p)| p.join(".agents/skills").is_dir());
         // Skip spawning background work when no skills are installed, no toggles exist, and no shared repo skills exist.
         if config.installed.is_empty() && config.global_enabled.is_empty() && config.project_enabled.is_empty() && !has_shared {
-            return;
+            return None;
         }
         let active = self.active_skill_harnesses(extra_harness);
         let root = skills_root();
-        let ticket = self.skills_page.sync_serial.fetch_add(1, Ordering::SeqCst) + 1;
-        let serial = self.skills_page.sync_serial.clone();
         let lock = self.skills_page.sync_lock.clone();
-        self.in_background(
-            move || {
-                let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                if serial.load(Ordering::SeqCst) != ticket {
-                    return Vec::new();
-                }
-                sync_all(&root, &home, &active, &config, &projects)
-            },
-            |ws, errors, cx| {
-                if let Some(first) = errors.first() {
-                    ws.toast(format!("Couldn't sync skills: {first}"), cx);
-                }
-            },
-            cx,
-        );
+        let previous = self.skills_page.sync_tail.take();
+        let serial = self.skills_page.sync_serial.clone();
+        let ticket = serial.load(Ordering::SeqCst);
+        let task = cx.background_executor().spawn(async move {
+            if let Some(previous) = previous { previous.await; }
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if serial.load(Ordering::SeqCst) != ticket { return Vec::new(); }
+            sync_all(&root, &home, &active, &config, &projects)
+        }).shared();
+        self.skills_page.sync_tail = Some(task.clone());
+        Some(task)
     }
 }

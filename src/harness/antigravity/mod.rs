@@ -68,6 +68,7 @@ pub const ADAPTER: Adapter = Adapter {
     custom_path: false,
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".gemini").join("config"),
+    global_skills: |home| home.join(".gemini/config/skills"),
     project_skills: ".agents/skills",
     // `/swarm` and `/teamwork` stay: they are how Google points multi-agent work on personal plans.
     hidden_commands: &["grill-me", "browser", "goal", "schedule", "learn", "boost"],

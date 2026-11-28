@@ -290,7 +290,7 @@ pub fn harness_config_root(harness: Harness, home: &Path) -> PathBuf {
 
 /// Global skills directory that `harness` reads automatically.
 pub fn global_skills_dir(harness: Harness, home: &Path) -> PathBuf {
-    harness_config_root(harness, home).join("skills")
+    (harness.adapter().global_skills)(home)
 }
 
 /// Per-project skills directory that `harness` reads automatically.
@@ -347,6 +347,16 @@ fn managed_store_roots(store_root: &Path) -> Vec<PathBuf> {
             if *sibling != app_name {
                 roots.push(vendor_dir.join(sibling).join("data").join("skills"));
             }
+        }
+    }
+    // macOS and Linux ProjectDirs layouts do not include the Windows `data` suffix.
+    if let Some(app_dir) = store_root.parent()
+        && let Some(app_name) = app_dir.file_name().and_then(|n| n.to_str())
+        && ["m4code", "m4code-Dev", "Claudiu", "Claudiu-Dev", "m4code-dev", "claudiu", "claudiu-dev"].contains(&app_name)
+        && let Some(parent) = app_dir.parent()
+    {
+        for sibling in ["m4code", "m4code-Dev", "Claudiu", "Claudiu-Dev", "m4code-dev", "claudiu", "claudiu-dev"] {
+            roots.push(parent.join(sibling).join("skills"));
         }
     }
     roots
@@ -517,12 +527,18 @@ pub fn sync_dir(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io:
     if target_dir.is_dir() {
         for entry in fs::read_dir(target_dir)?.flatten() {
             let path = entry.path();
+            if is_managed_copy(&path, store_root) {
+                if let Err(e) = fs::remove_dir_all(&path) { last_err = Some(e); }
+                continue;
+            }
             if !is_managed_link(&path, store_root) {
                 continue;
             }
             let name = entry.file_name();
             let keep = name.to_str().is_some_and(|n| {
-                enabled.iter().any(|e| e == n) && store_root.join(n).join("SKILL.md").is_file()
+                enabled.iter().any(|e| e == n)
+                    && fs::read_link(&path).ok().as_ref() == Some(&store_root.join(n))
+                    && path.join("SKILL.md").is_file()
             });
             if !keep && let Err(e) = remove_dir_link(&path) {
                 last_err = Some(e);
@@ -646,11 +662,17 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
             errors.push(format!("{} global skills: {e}", harness.name()));
         }
     }
+    if let Err(e) = sync_dir(store_root, &home.join(".codex/skills"), &[]) {
+        errors.push(format!("Codex legacy global skills: {e}"));
+    }
     let mut managed_shared = load_shared_links(store_root);
     let initial_shared = managed_shared.clone();
     for (project_id, project_path) in projects {
         if !project_path.is_dir() {
             continue;
+        }
+        if let Err(e) = sync_dir(store_root, &project_path.join(".codex/skills"), &[]) {
+            errors.push(format!("Codex legacy skills in {}: {e}", project_path.display()));
         }
         let project_wanted = config.project_enabled.get(project_id).map_or(&[][..], Vec::as_slice);
         let shared_root = project_path.join(".agents/skills");
@@ -671,14 +693,19 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
         } else {
             Vec::new()
         };
+        let mut synced = std::collections::HashSet::new();
         for harness in Harness::registered() {
             let dir = project_skills_dir(harness, project_path);
-            let wanted = if active.contains(&harness) { project_wanted } else { &[] };
-            if let Err(e) = sync_dir_for_harness(harness, store_root, &dir, wanted) {
+            if !synced.insert(dir.clone()) { continue; }
+            let sharing: Vec<_> = Harness::registered().filter(|h| project_skills_dir(*h, project_path) == dir).collect();
+            let enabled = sharing.iter().any(|h| active.contains(h));
+            let writer = sharing.iter().copied().find(|h| active.contains(h) && uses_copied_skills(*h)).unwrap_or(harness);
+            let wanted = if enabled { project_wanted } else { &[] };
+            if let Err(e) = sync_dir_for_harness(writer, store_root, &dir, wanted) {
                 errors.push(format!("{} skills in {}: {e}", harness.name(), project_path.display()));
             }
             if dir != shared_root {
-                let shared_wanted = if active.contains(&harness) { shared_repo_skills.as_slice() } else { &[] };
+                let shared_wanted = if enabled { shared_repo_skills.as_slice() } else { &[] };
                 if let Err(e) = sync_shared_dir(&shared_root, &dir, shared_wanted, &mut managed_shared) {
                     errors.push(format!("{} shared repo skills in {}: {e}", harness.name(), project_path.display()));
                 }
@@ -767,6 +794,77 @@ mod tests {
     }
 
     #[test]
+    fn codex_discovery_migrates_macos_legacy_links_and_preserves_user_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("Application Support");
+        let store = apps.join("m4code/skills");
+        let old = apps.join("Claudiu-Dev/skills");
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        write_skill(&store, "alpha");
+        let legacy = home.join(".codex/skills");
+        fs::create_dir_all(&legacy).unwrap();
+        link_dir(&old.join("alpha"), &legacy.join("alpha")).unwrap();
+        let shared = home.join(".agents/skills");
+        fs::create_dir_all(&shared).unwrap();
+        link_dir(&old.join("alpha"), &shared.join("alpha")).unwrap();
+        let user = write_skill(&legacy, "user-owned");
+        let user_link = shared.join("user-link");
+        link_dir(&tmp.path().join("missing-user-folder"), &user_link).unwrap();
+        let mut config = SkillsConfig::default();
+        config.set_global("alpha", true);
+        config.set_project("p", "alpha", true);
+        let errors = sync_all(&store, &home, &[Harness::Codex], &config, &[("p".into(), project.clone())]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(global_skills_dir(Harness::Codex, &home), shared);
+        assert_eq!(project_skills_dir(Harness::Codex, &project), project.join(".agents/skills"));
+        assert_eq!(fs::read_link(shared.join("alpha")).unwrap(), store.join("alpha"));
+        assert!(shared.join("alpha/SKILL.md").is_file());
+        assert!(project.join(".agents/skills/alpha/SKILL.md").is_file());
+        assert!(fs::symlink_metadata(legacy.join("alpha")).is_err());
+        assert!(user.join("SKILL.md").is_file());
+        assert!(fs::symlink_metadata(user_link).is_ok());
+    }
+
+    #[test]
+    fn shared_project_directory_survives_inactive_adapters_and_can_change_storage_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        write_skill(&store, "alpha");
+        let mut config = SkillsConfig::default();
+        config.set_project("p", "alpha", true);
+        let projects = [("p".into(), project.clone())];
+        let shared = project.join(".agents/skills/alpha");
+        for active in [vec![Harness::Codex], vec![Harness::Codex, Harness::Antigravity], vec![Harness::Codex]] {
+            let errors = sync_all(&store, &home, &active, &config, &projects);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(shared.join("SKILL.md").is_file());
+            assert_eq!(is_managed_copy(&shared, &store), active.contains(&Harness::Antigravity));
+        }
+        config.set_project("p", "alpha", false);
+        assert!(sync_all(&store, &home, &[Harness::Codex], &config, &projects).is_empty());
+        assert!(fs::symlink_metadata(shared).is_err());
+    }
+
+    #[test]
+    fn sync_retargets_enabled_links_from_another_windows_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("m4rocks/m4code/data/skills");
+        let old = tmp.path().join("m4rocks/Claudiu Dev/data/skills");
+        let target = tmp.path().join("target");
+        write_skill(&store, "alpha");
+        write_skill(&old, "alpha");
+        fs::create_dir_all(&target).unwrap();
+        link_dir(&old.join("alpha"), &target.join("alpha")).unwrap();
+        sync_dir(&store, &target, &["alpha".into()]).unwrap();
+        assert_eq!(fs::read_link(target.join("alpha")).unwrap(), store.join("alpha"));
+    }
+
+    #[test]
     fn valid_names_and_sources_reject_traversal() {
         assert!(valid_skill_name("agent-browser"));
         assert!(valid_skill_name("my_skill.v2"));
@@ -825,7 +923,8 @@ mod tests {
         assert!(project_skills_dir(Harness::Antigravity, &project).join("beta").join("SKILL.md").is_file());
         // Inactive harnesses do not get directories created.
         assert!(!global_skills_dir(Harness::Codex, &home).exists());
-        assert!(!project_skills_dir(Harness::Codex, &project).exists());
+        // Codex and Antigravity share the documented project discovery directory.
+        assert_eq!(project_skills_dir(Harness::Codex, &project), project_skills_dir(Harness::Antigravity, &project));
         // User-owned folder stays intact.
         assert_eq!(fs::read_to_string(user_skill.join("SKILL.md")).unwrap(), "user");
 

@@ -1403,6 +1403,7 @@ for line in sys.stdin:"#)
             app.update(gpui_kit::init);
             let (view, cx) = app.add_window_view(|window, cx| {
                 crate::thread::ThreadView::new(crate::thread::Start {
+                    skills_ready: None,
                     record_id: String::new(),
                     harness,
                     all_models: Vec::new(),

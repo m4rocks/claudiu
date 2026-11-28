@@ -37,7 +37,13 @@ impl SessionTools {
         Ok(Self { executable, env, ready, cwd: cwd.to_path_buf(), project: project.map(Path::to_path_buf), data })
     }
 
+    pub fn set_workspace(&mut self, cwd: &Path) {
+        self.cwd = cwd.to_path_buf();
+        self.env.retain(|(key, _)| *key != WORKSPACE_ENV);
+    }
+
     pub fn load_workspace(&mut self) {
+        self.env.retain(|(key, _)| *key != WORKSPACE_ENV);
         self.env.push((WORKSPACE_ENV, workspace(&self.cwd, self.project.as_deref()).to_string()));
     }
 

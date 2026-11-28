@@ -65,6 +65,7 @@ pub const ADAPTER: Adapter = Adapter {
     custom_path: false,
     probe_env: super::no_probe_env,
     config_root,
+    global_skills: |home| config_root(home).join("skills"),
     project_skills: ".opencode/skills",
     hidden_commands: &["models", "connect", "share", "unshare", "sessions"],
     worktree: super::WorktreeHooks::DEFAULT,

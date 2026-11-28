@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use futures::channel::{mpsc as async_mpsc, oneshot};
+use futures::FutureExt;
 use serde_json::{Value, json};
+
+type Shutdown = futures::future::Shared<futures::future::BoxFuture<'static, Result<(), String>>>;
 
 /// How to start a harness's ACP server.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -91,6 +94,7 @@ pub struct Connection {
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
     closed: Arc<AtomicBool>,
+    shutdown: Mutex<Option<Shutdown>>,
 }
 
 impl Connection {
@@ -180,7 +184,7 @@ impl Connection {
                 }
             });
         }
-        Connection { outgoing, pending, next_id: AtomicI64::new(1), child, closed }
+        Connection { outgoing, pending, next_id: AtomicI64::new(1), child, closed, shutdown: Mutex::new(None) }
     }
 
     pub fn request(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> + use<> {
@@ -213,6 +217,16 @@ impl Connection {
     }
 
     pub fn terminate(&self) {
+        drop(self.terminate_and_wait());
+    }
+
+    /// Resolve only after the server process exits, so a replacement can acquire its native session.
+    pub fn terminate_and_wait(&self) -> Shutdown {
+        let mut shutdown = self.shutdown.lock().unwrap();
+        if let Some(done) = shutdown.as_ref() { return done.clone(); }
+        let (tx, rx) = oneshot::channel();
+        let done = async move { rx.await.unwrap_or_else(|_| Err("Agent shutdown was interrupted.".into())) }.boxed().shared();
+        *shutdown = Some(done.clone());
         self.closed.store(true, Ordering::Release);
         self.pending.lock().unwrap().clear();
         // Telling the writer thread to stop drops the child's stdin pipe, which is the polite shutdown signal
@@ -223,6 +237,7 @@ impl Connection {
             std::thread::spawn(move || {
                 for _ in 0..30 {
                     if child.try_wait().ok().flatten().is_some() {
+                        let _ = tx.send(Ok(()));
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(100));
@@ -235,9 +250,13 @@ impl Connection {
                     let _ = kill_tree.status();
                 }
                 let _ = child.kill();
-                let _ = child.wait();
+                let result = child.wait().map(|_| ()).map_err(|e| format!("Could not stop the agent: {e}"));
+                let _ = tx.send(result);
             });
+        } else {
+            let _ = tx.send(Ok(()));
         }
+        done
     }
 }
 

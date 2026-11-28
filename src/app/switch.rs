@@ -217,7 +217,7 @@ impl Workspace {
     pub(super) fn fail_worktree_switch(&mut self, id: &str, folder: &Path, error: &str, cx: &mut Context<Self>) {
         if self.switching_worktree.get(id).map(PathBuf::as_path) == Some(folder) {
             self.switching_worktree.remove(id);
-            self.toast(format!("Worktree switch failed. The original session is still open. {error}"), cx);
+            self.toast(format!("Worktree switch failed. The session stays in its original checkout. {error}"), cx);
             cx.notify();
         }
     }
