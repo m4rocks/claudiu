@@ -103,6 +103,13 @@ impl Workspace {
 
     /// Check what the request needs. A new session's folder, or the worktree to switch to, is resolved into `req.args["folder"]`.
     fn prepare(&self, req: &mut Request, cx: &App) -> Result<(), String> {
+        // The tool isn't offered to such a session at all; this refuses a call that reaches m4code anyway.
+        let asking = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
+        if let Some(harness) = self.store.session(asking).and_then(SessionRecord::harness)
+            && harness.adapter().mcp_off.contains(&req.tool.as_str())
+        {
+            return Err(format!("{} sessions can't use {}.", harness.name(), req.tool));
+        }
         if req.tool == "switch_worktree" {
             return self.prepare_switch(req);
         }

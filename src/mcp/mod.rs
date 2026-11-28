@@ -92,8 +92,9 @@ fn feature_of(tool: &str) -> Option<&'static str> {
     }
 }
 
+/// Off as a whole feature, or by its own name for an adapter that turns off a single tool (`Adapter::mcp_off`).
 fn is_off(off: &[&str], tool: &str) -> bool {
-    feature_of(tool).is_some_and(|f| off.contains(&f))
+    off.contains(&tool) || feature_of(tool).is_some_and(|f| off.contains(&f))
 }
 
 /// Tools the model uses to tell m4code something about itself; none of them reads or starts another session.
@@ -214,6 +215,10 @@ fn instructions(off: &[&str]) -> String {
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
         text += SUBAGENT_INSTRUCTIONS;
+        let single: Vec<&str> = BRIDGE_TOOLS.iter().copied().filter(|tool| off.contains(tool)).collect();
+        if !single.is_empty() {
+            text += &format!(" This session doesn't have {}.", single.join(" or "));
+        }
     }
     if on("ask_user") {
         text += " To ask the user a multiple-choice question in m4code's UI, call ask_user with the question and options instead of any built-in question tool.";
@@ -1027,6 +1032,14 @@ mod tests {
         let keeping = instructions(&[PREFER_OWN_TOOLS]);
         assert!(!keeping.contains("swarm") && !keeping.contains("/teamwork"), "{keeping}");
         assert!(keeping.contains("/login"), "the other advice stays");
+    }
+
+    #[test]
+    fn a_single_tool_turned_off_is_neither_offered_nor_promised() {
+        let off = ["start_code_session", "read_code_session"];
+        assert!(is_off(&off, "start_code_session") && is_off(&off, "read_code_session"));
+        assert!(!is_off(&off, "list_code_sessions"), "the rest of the feature stays");
+        assert!(instructions(&off).contains("This session doesn't have read_code_session or start_code_session."));
     }
 
     #[test]

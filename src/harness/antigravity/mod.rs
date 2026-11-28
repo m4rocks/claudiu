@@ -95,8 +95,9 @@ pub const ADAPTER: Adapter = Adapter {
     copies_skills: true,
     capabilities: CAPABILITIES,
     // Google points multi-agent work on personal plans to `/swarm` and `/teamwork`, so the instructions don't steer
-    // Antigravity away from them.
-    mcp_off: &[crate::mcp::PREFER_OWN_TOOLS],
+    // Antigravity away from them. Starting a session with a prompt it wrote, or reading another session into its
+    // context, would make it the coordinating agent Google's terms rule out.
+    mcp_off: &[crate::mcp::PREFER_OWN_TOOLS, "start_code_session", "read_code_session"],
     reports: None,
     native_sessions: None,
     // Text generation ran agy from this folder before Google's terms ruled it out.

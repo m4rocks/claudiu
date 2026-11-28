@@ -25,6 +25,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 > - Conversations from other models can't be handed to Antigravity. You can hand an Antigravity conversation to another model yourself, but auto-handoff and an agent's `set_model` can't.
 > - Antigravity can't be the text generation model. A saved choice switches back to the local summary.
 > - **Allow subagent delegation** and **Allow cross-harness subagents** start off for Antigravity. Turn them on at your own risk.
+> - Antigravity sessions don't get `start_code_session` or `read_code_session`, so they can't start sessions or read other ones.
 > - Antigravity's usage meter updates only when you press refresh.
 
 ## Features
